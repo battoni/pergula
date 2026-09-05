@@ -1,0 +1,12 @@
+<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <g id="icon">
+    <!-- line 1 — full, regular -->
+    <path fill="#c0e021" d="M32 32 H480 V96 H32 Z"/>
+    <!-- line 2 — snapped; only the head is left, sheared off -->
+    <path fill="#c0e021" d="M32 160 H240 L184 224 H32 Z"/>
+    <!-- line 3 — full, regular -->
+    <path fill="#c0e021" d="M32 288 H480 V352 H32 Z"/>
+    <!-- the remainder of line 2, fallen: 288 down, 64 left, out of the frame -->
+    <path fill="#c0e021" d="M176 448 H416 V512 H120 Z"/>
+  </g>
+</svg>

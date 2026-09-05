@@ -1,0 +1,5 @@
+<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <g id="icon">
+    <path fill="#c0e021" fill-rule="evenodd" d="M32,32 H368 V96 H480 V352 H368 V480 H32 Z M96,96 H320 V320 H160 V416 H96 Z M160,160 H256 V256 H160 Z"/>
+  </g>
+</svg>

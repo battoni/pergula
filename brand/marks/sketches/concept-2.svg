@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 512">
+  <g id="icon">
+    <rect x="40" y="76" width="432" height="68" fill="#d98b63" />
+    <path d="M72 164 H440 V436 H336 V236 H176 V436 H72 Z" fill="#d97757" />
+    <rect x="176" y="368" width="160" height="68" fill="#7d746c" />
+  </g>
+  <g id="wordmark">
+    <text x="540" y="284" fill="#d98b63" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="110" font-weight="600" letter-spacing="4">pergula</text>
+  </g>
+</svg>

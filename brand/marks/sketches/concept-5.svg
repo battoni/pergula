@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 512">
+  <g id="icon">
+    <rect x="148" y="132" width="56" height="260" fill="#d98b63" />
+    <rect x="366" y="214" width="24" height="178" fill="#7d746c" />
+    <rect x="204" y="298" width="186" height="24" fill="#7d746c" />
+    <polygon points="112,100 432,192 432,238 112,146" fill="#d98b63" />
+    <rect x="80" y="386" width="356" height="24" fill="#d97757" />
+  </g>
+
+  <g id="wordmark">
+    <text
+      x="516"
+      y="286"
+      fill="#d98b63"
+      font-family="Helvetica Neue, Helvetica, Arial, sans-serif"
+      font-size="116"
+      font-weight="600"
+      letter-spacing="5"
+    >pergula</text>
+  </g>
+</svg>

@@ -1,0 +1,2300 @@
+#!/usr/bin/env python3
+"""pergula — a local, dependency-free window onto your Claude Code sessions.
+
+The terminal renders Claude's prose hard-wrapped, so selecting it with the mouse
+puts real newlines inside every paragraph. This serves the transcripts as a plain
+web page on 127.0.0.1: text selects the way text is supposed to select, and every
+code block gets a copy button.
+
+A sidebar groups every session by project. Sessions carry the name and the colour
+you gave them with /rename and /color, because the CLI writes both into the
+transcript.
+
+Nothing leaves the machine. No framework, no build step, no dependencies beyond
+the Python standard library.
+
+  pergula              open the window; serve first if nothing is listening
+  pergula --serve      always serve in the foreground, never just open
+  pergula --install    run at login as a background agent, restarted if it dies
+  pergula --uninstall  remove that agent
+  pergula --status     say whether anything is listening
+  pergula --port 8080  any of the above, somewhere else
+  pergula --here       only list sessions from the current directory
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import os
+import plistlib
+import re
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+PROJECTS = Path.home() / ".claude" / "projects"
+
+CONVERSATION_TYPES = {"user", "assistant"}
+
+# How much of a transcript to read when we only want its metadata. The first
+# conversation record (cwd, branch, opening prompt) sits at the head; the newest
+# title and colour sit at the tail, because the CLI appends them as they change.
+HEAD_BYTES = 96 * 1024
+TAIL_BYTES = 256 * 1024
+
+# Turns sent to the page by default; the rest stays a click away.
+DEFAULT_LIMIT = 400
+
+# Project nicknames live next to the transcripts they rename, so they survive
+# reinstalls of this script and are trivial to inspect or delete by hand.
+NAMES_PATH = Path.home() / ".claude" / "pergula-names.json"
+
+# The CLI keeps one file per running session here, named by pid, holding the
+# session id, the cwd and a busy/idle status. It is the only honest answer to
+# "which sessions are open in a terminal right now" — no process table, no
+# reading another process's environment.
+LIVE_PATH = Path.home() / ".claude" / "sessions"
+
+# Fallback for installs with no session registry: treat recent writes as live.
+FALLBACK_WINDOW = 2 * 3600
+
+# The app icon, embedded rather than kept beside the script: pergula is one
+# file with nothing next to it, and that is the point. Source of truth for the
+# mark is brand/pergula-icon.svg; regenerate with brand/ and paste the base64.
+ICON_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAgAAAAIACAIAAAB7GkOtAAAABmJLR0QA/wD/AP+gvaeTAAAKO0lE"
+    "QVR4nO3Yv6pkWR2G4arTZ7pbB0z6qAyKYGQiYiAysYE3IBiZmwmaGhpoZiaKqaIDRoKBuZdgNoiI"
+    "mAgKgkH36e4Zr0A4f/bea616n+cKfkntd9V3vrl5cQKg52r0AQCMIQAAUQIAECUAAFECABAlAABR"
+    "AgAQJQAAUQIAECUAAFECABAlAABRAgAQJQAAUQIAECUAAFECABAlAABRAgAQJQAAUQIAECUAAFEC"
+    "ABAlAABRAgAQJQAAUQIAECUAAFECABAlAABRAgAQJQAAUQIAECUAAFECABAlAABRAgAQJQAAUQIA"
+    "ECUAAFECABAlAABRAgAQJQAAUQIAECUAAFECABAlAABRAgAQJQAAUQIAECUAAFECABAlAABRAgAQ"
+    "JQAAUQIAECUAAFECABAlAABRAgAQJQAAUQIAECUAAFECABAlAABRAgAQJQAAUQIAECUAAFECABAl"
+    "AABRAgAQJQAAUQIAECUAAFECABAlAABRAgAQJQAAUQIAECUAAFECABAlAABRAgAQJQAAUQIAECUA"
+    "AFECABAlAABRAgAQJQAAUQIAECUAAFECABAlAABRAgAQJQAAUdejD5jCTz949+lzLYSK21cff//b"
+    "/x19xXgCcDqdTp/9/JOnz0YfARzl9e159AlT8OwFiBIAgCgBAIgSAIAoAQCIEgCAKAEAiBIAgCgB"
+    "AIgSAIAoAQCIEgCAKAEAiBIAgCgBAIgSAIAoAQCIEgCAKAEAiBIAgCgBAIgSAIAoAQCIEgCAKAEA"
+    "iBIAgCgBAIgSAIAoAQCIEgCAKAEAiBIAgCgBAIgSAIAoAQCIEgCAKAEAiBIAgCgBAIgSAIAoAQCI"
+    "EgCAKAEAiBIAgCgBAIgSAIAoAQCIEgCAKAEAiBIAgCgBAIgSAIAoAQCIEgCAKAEAiBIAgCgBAIgS"
+    "AIAoAQCIEgCAKAEAiBIAgCgBAIgSAIAoAQCIEgCAKAEAiBIAgCgBAIgSAICo69EHTOEPv3l1/c7o"
+    "I4CjvHl9Hn3CFM43Ny9G3wDAACYggCgBAIgSAIAoAQCIEgCAKAEAiBIAgCgBAIgSAIAoAQCIEgCA"
+    "KAEAiBIAgCgBAIgSAIAoAQCIEgCAKAEAiBIAgCgBAIgSAIAoAQCIEgCAKAEAiBIAgCgBAIgSAIAo"
+    "AQCIEgCAKAEAiBIAgCgBAIgSAIAoAQCIEgCAKAEAiBIAgCgBAIgSAIAoAQCIEgCAKAEAiBIAgCgB"
+    "AIgSAIAoAQCIuh59wBS++KWr89V59BUs7B9/ffvq5egj4J7ONzcvRt8w3q//9Klnz0cfwcr++Lvb"
+    "X/5EAViMCQg28M1vPf3q+/5PsxgBgA2cz6fv/vD5Jz5pSGQlAgDb+PR7V9/53rPRV8A9CABsxhDE"
+    "WgQANmMIYi0CAFsyBLEQAYCNGYJYhQDAxgxBrEIAYHuGIJYgALALQxDzEwDYhSGI+QkA7MUQxOQE"
+    "AHZkCGJmAgA7MgQxMwGAfRmCmJYAwO4MQcxJAGB3hiDmJABwBEMQExIAOIghiNkIABzEEMRsBACO"
+    "YwhiKgIAhzIEMQ8BgEMZgpiHAMDRDEFMQgBgAEMQMxAAGMAQxAwEAMYwBDGcAMAwhiDGEgAYxhDE"
+    "WAIAIxmCGEgAYDBDEKMIAAxmCGIUAYDxDEEMIQAwBUMQxxMAmIIhiOMJAMzCEMTBBAAmYgjiSAIA"
+    "EzEEcSQBgLkYgjiMAMB0DEEcQwBgOoYgjiEAMCNDEAcQAJiUIYi9CQBMyhDE3gQA5mUIYlcCAFMz"
+    "BLEfAYCpGYLYjwDA7AxB7EQAYAGGIPYgALAAQxB7EABYgyGIzQkALMMQxLYEAJZhCGJbAgArMQSx"
+    "IQGAxRiC2IoAwGIMQWxFAGA9hiA2IQCwJEMQjycAsCRDEI8nALAqQxCPJACwMEMQjyEAsDBDEI8h"
+    "ALA2QxAPJgCwPEMQDyMAsDxDEA8jAHAJDEE8gADAhTAEcV8CABfCEMR9CQBcDkMQ9yIAcFEMQdyd"
+    "AMBFMQRxd+ebmxejbxjvy197cvXED4bL8bcP3/7n3x+PvoLZCQBAlAkIIEoAAKIEACBKAACiBAAg"
+    "SgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBK"
+    "AACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoA"
+    "AKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACirkcfAJfg/W+8894XzqOv4K7evjn9/le3o68Y"
+    "TwBgA//650c/+PG7V09G38Hd3L4SgNPJBASb+PDPb31QWI4AwDZ++/OXf//L29FXwD0IAGzjzevT"
+    "z3708iMJYB0CAJsxBLEWAYAtGYJYiADAlgxBLEQAYGOGIFYhALA9QxBLEADYniGIJQgA7MIQxPwE"
+    "APZiCGJyAgB7MQQxOQGAHRmCmJkAwL4MQUxLAGBfhiCmJQCwO0MQcxIAOIIhiAkJABzBEMSEBAAO"
+    "YghiNgIAxzEEMRUBgOMYgpiKAMChDEHMQwDgaIYgJiEAcDRDEJMQABjAEMQMBADGMAQxnADAGIYg"
+    "hhMAGMYQxFgCACMZghhIAGAkQxADCQAMZghiFAGA8QxBDCEAMJ4hiCEEAKZgCOJ4AgCzMARxMAGA"
+    "WRiCOJgAwEQMQRxJAGAuhiAOIwAwF0MQhxEAmI4hiGMIAMzIEMQBBABmZAjiAAIAkzIEsTcBgHkZ"
+    "gtiVAMC8DEHsSgBgaoYg9iMAMDtDEDsRAJidIYidCAAswBDEHgQA1mAIYnMCAGswBLE5AYBlGILY"
+    "lgDASgxBbEgAYCWGIDYkALAYQxBbEQBYjyGITQgArMcQxCYEAJZkCOLxBABWZQjikQQAVmUI4pEE"
+    "ABZmCOIxBADWZgjiwQQA1mYI4sEEAJZnCOJhBAAugSGIBxAAuASGIB5AAOBCGIK4LwGAy2EI4l4E"
+    "AC6HIYh7EQC4KIYg7u569AHAxj74xcuvfP3JZz7nefd/vZbI0+l0Op1vbl6MvgGAAbwRAKIEACBK"
+    "AACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoA"
+    "AKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAA"
+    "ogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACi"
+    "BAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIE"
+    "ACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQA"
+    "IEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACBKAACiBAAgSgAAogQAIEoAAKIEACDqf7ww8PqU"
+    "mNDpAAAAAElFTkSuQmCC"
+)
+
+MANIFEST = """{
+  "name": "pergula",
+  "short_name": "pergula",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#14120f",
+  "theme_color": "#14120f",
+  "icons": [
+    {"src": "/icon.png", "sizes": "512x512", "type": "image/png",
+     "purpose": "any maskable"}
+  ]
+}"""
+
+AGENT_LABEL = "dev.battoni.pergula"
+AGENT_PLIST = Path.home() / "Library" / "LaunchAgents" / f"{AGENT_LABEL}.plist"
+AGENT_LOG = Path.home() / "Library" / "Logs" / "pergula.log"
+
+# The system interpreter, not whatever pyenv happens to be shimming today: the
+# agent has to survive a version switch it knows nothing about.
+AGENT_PYTHON = "/usr/bin/python3"
+
+
+# Wrappers the CLI injects into user turns that are not something the user typed.
+NOISE_PATTERNS = [
+    re.compile(r"<system-reminder>.*?</system-reminder>", re.S),
+    re.compile(r"<local-command-stdout>.*?</local-command-stdout>", re.S),
+    re.compile(r"<command-message>.*?</command-message>", re.S),
+    re.compile(r"<command-name>.*?</command-name>", re.S),
+    re.compile(r"<command-args>.*?</command-args>", re.S),
+    re.compile(r"<local-command-caveat>.*?</local-command-caveat>", re.S),
+    re.compile(r"<task-notification>.*?</task-notification>", re.S),
+]
+
+_META_CACHE: dict[str, tuple[str, dict]] = {}
+
+# Transcripts only ever grow, so re-parsing 60 MB to reach the last few lines is
+# waste. We keep what was already read together with the offset of the end of the
+# last complete line; the next read starts there.
+_MESSAGE_CACHE: dict[str, tuple[int, list[dict]]] = {}
+
+# A 60 MB transcript becomes roughly 100 MB of objects. Holding every session
+# ever visited would fill the memory of anyone with many; eight covers any real
+# back-and-forth between terminals.
+MESSAGE_CACHE_LIMIT = 8
+_CACHE_LOCK = threading.Lock()
+
+
+# HELPERS
+
+
+def project_slug(directory: Path) -> str:
+    return re.sub(r"[^a-zA-Z0-9]", "-", str(directory))
+
+
+def signature(path: Path) -> str:
+    info = path.stat()
+    return f"{info.st_mtime_ns}:{info.st_size}"
+
+
+def read_head(path: Path, limit: int = HEAD_BYTES) -> list[str]:
+    with path.open("rb") as handle:
+        chunk = handle.read(limit)
+
+    lines = chunk.decode("utf-8", errors="replace").split("\n")
+    if len(chunk) == limit:
+        lines.pop()
+
+    return lines
+
+
+def read_tail(path: Path, limit: int = TAIL_BYTES) -> list[str]:
+    size = path.stat().st_size
+    with path.open("rb") as handle:
+        if size > limit:
+            handle.seek(size - limit)
+        chunk = handle.read()
+
+    lines = chunk.decode("utf-8", errors="replace").split("\n")
+    if size > limit:
+        lines.pop(0)
+
+    return lines
+
+
+def strip_noise(text: str) -> str:
+    for pattern in NOISE_PATTERNS:
+        text = pattern.sub("", text)
+
+    return text.strip()
+
+
+def summarize_tool(name: str, payload: dict) -> tuple[str, str]:
+    """Return (one-line subtitle, copyable body) for a tool call."""
+    if name == "Bash":
+        return payload.get("description", ""), payload.get("command", "")
+
+    for field in ("file_path", "path", "pattern", "url", "query", "prompt"):
+        if field in payload:
+            return str(payload[field])[:200], ""
+
+    return "", ""
+
+
+def session_meta(path: Path) -> dict:
+    """Cheap metadata for one transcript, cached until the file changes."""
+    key = str(path)
+    stamp = signature(path)
+
+    with _CACHE_LOCK:
+        cached = _META_CACHE.get(key)
+        fresh = cached and cached[0] == stamp
+        if fresh:
+            return cached[1]
+
+    info = path.stat()
+    small = info.st_size <= HEAD_BYTES + TAIL_BYTES
+    head = read_head(path)
+    tail = head if small else read_tail(path)
+
+    meta = {
+        "id": path.stem,
+        "slug": path.parent.name,
+        "cwd": "",
+        "branch": "",
+        "opening": "",
+        "aiTitle": "",
+        "customTitle": "",
+        "color": "",
+        "mtime": info.st_mtime,
+        "size": info.st_size,
+    }
+
+    for line in head:
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        learns_cwd = not meta["cwd"] and record.get("cwd")
+        if learns_cwd:
+            meta["cwd"] = record["cwd"]
+            meta["branch"] = record.get("gitBranch") or ""
+
+        learns_opening = not meta["opening"] and record.get("type") == "user"
+        if learns_opening:
+            content = (record.get("message") or {}).get("content")
+            if isinstance(content, str):
+                text = " ".join(strip_noise(content).split())
+                if text:
+                    meta["opening"] = text[:110]
+
+        complete = meta["cwd"] and meta["opening"]
+        if complete:
+            break
+
+    # Later records win: a session can be renamed or recoloured many times.
+    for line in tail:
+        boring = "title" not in line and "agent" not in line
+        if boring:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        kind = record.get("type")
+
+        if kind == "ai-title":
+            meta["aiTitle"] = record.get("aiTitle") or meta["aiTitle"]
+            continue
+
+        if kind == "custom-title":
+            meta["customTitle"] = record.get("customTitle") or meta["customTitle"]
+            continue
+
+        if kind == "agent-name":
+            meta["customTitle"] = meta["customTitle"] or (record.get("agentName") or "")
+            continue
+
+        if kind == "agent-color":
+            meta["color"] = record.get("agentColor") or meta["color"]
+
+    meta["title"] = meta["customTitle"] or meta["aiTitle"] or meta["opening"] or path.stem[:8]
+    meta["renamed"] = bool(meta["customTitle"])
+
+    with _CACHE_LOCK:
+        _META_CACHE[key] = (stamp, meta)
+
+    return meta
+
+
+def live_sessions() -> dict:
+    """session id -> {pid, status, name, since} for every session with a live process."""
+    live: dict[str, dict] = {}
+    try:
+        entries = sorted(LIVE_PATH.glob("*.json"))
+    except OSError:
+        return live
+
+    for entry in entries:
+        try:
+            record = json.loads(entry.read_text(encoding="utf-8"))
+            pid = int(record["pid"])
+            session = str(record["sessionId"])
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+            continue
+
+        # A crashed session can leave its file behind; the pid is the truth.
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            continue
+        except PermissionError:
+            pass
+        except OSError:
+            continue
+
+        live[session] = {
+            "pid": pid,
+            "status": record.get("status") or "",
+            "name": record.get("name") or "",
+            "since": record.get("startedAt", 0) / 1000,
+        }
+
+    return live
+
+
+def live_stamp(live: dict) -> str:
+    return ",".join(f"{session}:{data['status']}" for session, data in sorted(live.items()))
+
+
+def load_names() -> dict:
+    try:
+        data = json.loads(NAMES_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    return data if isinstance(data, dict) else {}
+
+
+def save_name(slug: str, label: str) -> dict:
+    with _CACHE_LOCK:
+        names = load_names()
+        if label:
+            names[slug] = label
+        if not label:
+            names.pop(slug, None)
+
+        NAMES_PATH.write_text(json.dumps(names, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    return names
+
+
+def names_stamp() -> str:
+    try:
+        return str(NAMES_PATH.stat().st_mtime_ns)
+    except OSError:
+        return "0"
+
+
+def all_transcripts(scope: Path | None) -> list[Path]:
+    if scope is not None:
+        directory = PROJECTS / project_slug(scope)
+        return list(directory.glob("*.jsonl")) if directory.is_dir() else []
+
+    return list(PROJECTS.glob("*/*.jsonl"))
+
+
+def find_transcript(scope: Path | None, session: str | None) -> Path | None:
+    transcripts = all_transcripts(scope)
+    if not transcripts:
+        return None
+
+    if session:
+        for path in transcripts:
+            if path.stem == session:
+                return path
+
+        return None
+
+    return max(transcripts, key=lambda path: path.stat().st_mtime)
+
+
+def build_index(scope: Path | None) -> dict:
+    transcripts = all_transcripts(scope)
+    if not transcripts:
+        return {"token": "empty", "projects": [], "active": None}
+
+    newest = max(transcripts, key=lambda path: path.stat().st_mtime)
+    live = live_sessions()
+    names = load_names()
+    token = f"{len(transcripts)}:{newest}:{signature(newest)}:{names_stamp()}:{live_stamp(live)}"
+
+    groups: dict[str, dict] = {}
+    for path in transcripts:
+        try:
+            meta = session_meta(path)
+        except OSError:
+            continue
+
+        running = live.get(meta["id"])
+        meta = {
+            **meta,
+            "live": bool(running),
+            "status": running["status"] if running else "",
+            "pid": running["pid"] if running else 0,
+        }
+
+        group = groups.setdefault(meta["slug"], {"slug": meta["slug"], "path": "", "sessions": []})
+        first_cwd_seen = meta["cwd"] and not group["path"]
+        if first_cwd_seen:
+            group["path"] = meta["cwd"]
+        group["sessions"].append(meta)
+
+    projects = []
+    for group in groups.values():
+        group["sessions"].sort(key=lambda meta: meta["mtime"], reverse=True)
+        group["path"] = group["path"] or group["slug"].lstrip("-").replace("-", "/")
+        group["label"] = names.get(group["slug"], "")
+        group["mtime"] = group["sessions"][0]["mtime"]
+        projects.append(group)
+
+    projects.sort(key=lambda group: group["mtime"], reverse=True)
+
+    # Follow a session that is genuinely open before falling back to whichever
+    # file was touched last — a finished session should not steal the view.
+    running_ids = {meta["id"] for group in projects for meta in group["sessions"] if meta["live"]}
+    active = newest.stem
+    active_is_stale = running_ids and active not in running_ids
+    if active_is_stale:
+        candidates = [meta for group in projects for meta in group["sessions"] if meta["live"]]
+        active = max(candidates, key=lambda meta: meta["mtime"])["id"]
+
+    return {
+        "token": token,
+        "projects": projects,
+        "active": active,
+        "hasRegistry": LIVE_PATH.is_dir(),
+    }
+
+
+def parse_lines(lines, messages: list[dict]) -> None:
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        if record.get("type") not in CONVERSATION_TYPES:
+            continue
+
+        message = record.get("message") or {}
+        role = message.get("role")
+        content = message.get("content")
+        stamp = record.get("timestamp", "")
+
+        if isinstance(content, str):
+            text = strip_noise(content)
+            if text:
+                messages.append({"role": role, "kind": "text", "text": text, "ts": stamp})
+            continue
+
+        if not isinstance(content, list):
+            continue
+
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+
+            kind = block.get("type")
+
+            if kind == "text":
+                text = strip_noise(block.get("text", ""))
+                if text:
+                    messages.append({"role": role, "kind": "text", "text": text, "ts": stamp})
+                continue
+
+            if kind == "tool_use":
+                name = block.get("name", "tool")
+                payload = block.get("input") or {}
+                subtitle, body = summarize_tool(name, payload)
+                messages.append({
+                    "role": "tool",
+                    "kind": "tool_use",
+                    "name": name,
+                    "subtitle": subtitle,
+                    "text": body,
+                    "ts": stamp,
+                })
+                continue
+
+            if kind == "tool_result":
+                body = block.get("content")
+                if isinstance(body, list):
+                    body = "\n".join(
+                        part.get("text", "")
+                        for part in body
+                        if isinstance(part, dict) and part.get("type") == "text"
+                    )
+                text = (body or "").strip() if isinstance(body, str) else ""
+                if text:
+                    messages.append({"role": "tool", "kind": "tool_result", "text": text, "ts": stamp})
+
+
+
+def state_token(path: Path, limit: int) -> str:
+    """The identity of a response, from stat() alone — the file stays shut."""
+    return f"{path}:{signature(path)}:{limit}"
+
+
+def parse_transcript(path: Path) -> list[dict]:
+    key = str(path)
+    size = path.stat().st_size
+
+    with _CACHE_LOCK:
+        cached = _MESSAGE_CACHE.get(key)
+
+    unchanged = cached and cached[0] == size
+    if unchanged:
+        with _CACHE_LOCK:
+            # Refresh its position: eviction drops the least recently used.
+            if key in _MESSAGE_CACHE:
+                _MESSAGE_CACHE[key] = _MESSAGE_CACHE.pop(key)
+        return cached[1]
+
+    # It grew: carry on from where we stopped. Shrunk or new: read from zero.
+    resume = bool(cached) and cached[0] < size
+    start, messages = (cached[0], list(cached[1])) if resume else (0, [])
+
+    with path.open("rb") as handle:
+        handle.seek(start)
+        chunk = handle.read()
+
+    # A live session may be mid-write, so only whole lines are consumed.
+    end = chunk.rfind(b"\n")
+    if end == -1:
+        return messages
+
+    text = chunk[: end + 1].decode("utf-8", errors="replace")
+    parse_lines(text.splitlines(), messages)
+
+    with _CACHE_LOCK:
+        _MESSAGE_CACHE.pop(key, None)
+        _MESSAGE_CACHE[key] = (start + end + 1, messages)
+        while len(_MESSAGE_CACHE) > MESSAGE_CACHE_LIMIT:
+            _MESSAGE_CACHE.pop(next(iter(_MESSAGE_CACHE)))
+
+    return messages
+
+
+def build_state(scope: Path | None, session: str | None, limit: int) -> dict:
+    path = find_transcript(scope, session)
+    if path is None:
+        return {"token": "empty", "session": None, "messages": [], "total": 0}
+
+    messages = parse_transcript(path)
+    total = len(messages)
+
+    # A long session can carry thousands of turns; sending them all would stall
+    # the page on every poll. The tail is what anyone is reading anyway.
+    window = messages[-limit:] if limit and total > limit else messages
+
+    return {
+        "token": state_token(path, limit),
+        "session": session_meta(path),
+        "messages": window,
+        "total": total,
+    }
+
+
+# SERVER
+
+
+class Handler(BaseHTTPRequestHandler):
+    scope: Path | None = None
+
+    def log_message(self, *_args):
+        pass
+
+    def send_payload(self, status: int, body: bytes, content_type: str):
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Pergula", "1")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_json(self, payload: dict, since: str):
+        nothing_changed = since and since == payload.get("token")
+        if nothing_changed:
+            self.send_payload(204, b"", "application/json")
+            return
+
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_payload(200, body, "application/json; charset=utf-8")
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        query = parse_qs(parsed.query)
+        since = (query.get("since") or [""])[0]
+
+        if parsed.path == "/":
+            self.send_payload(200, PAGE.encode("utf-8"), "text/html; charset=utf-8")
+            return
+
+        if parsed.path == "/manifest.webmanifest":
+            self.send_payload(200, MANIFEST.encode("utf-8"),
+                              "application/manifest+json; charset=utf-8")
+            return
+
+        if parsed.path in ("/icon.png", "/apple-touch-icon.png"):
+            self.send_payload(200, base64.b64decode(ICON_B64), "image/png")
+            return
+
+        if parsed.path == "/api/ping":
+            self.send_payload(200, b'{"ok":true}', "application/json")
+            return
+
+        if parsed.path == "/api/index":
+            self.send_json(build_index(self.scope), since)
+            return
+
+        if parsed.path == "/api/state":
+            session = (query.get("session") or [""])[0] or None
+            try:
+                limit = max(0, int((query.get("limit") or ["400"])[0]))
+            except ValueError:
+                limit = DEFAULT_LIMIT
+
+            # The token comes from stat(), so "nothing changed" can be answered
+            # without opening the transcript. Before this line, every 700 ms poll
+            # read and parsed the whole file only to discover it owed a 204.
+            path = find_transcript(self.scope, session)
+            unchanged = path is not None and since and since == state_token(path, limit)
+            if unchanged:
+                self.send_payload(204, b"", "application/json")
+                return
+
+            self.send_json(build_state(self.scope, session, limit), since)
+            return
+
+        self.send_payload(404, b"not found", "text/plain; charset=utf-8")
+
+    def do_POST(self):
+        if urlparse(self.path).path != "/api/rename":
+            self.send_payload(404, b"not found", "text/plain; charset=utf-8")
+            return
+
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            slug = str(payload["slug"])
+            label = str(payload.get("label") or "").strip()[:80]
+        except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+            self.send_payload(400, b"bad request", "text/plain; charset=utf-8")
+            return
+
+        save_name(slug, label)
+        self.send_payload(200, b'{"ok":true}', "application/json")
+
+
+PAGE = r"""<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pergula</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icon.png">
+<meta name="theme-color" content="#14120f">
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%20512%20512%22%3E%3Cstyle%3E%23i%7Bfill%3A%236d8214%7D%40media%28prefers-color-scheme%3Adark%29%7B%23i%7Bfill%3A%23c0e021%7D%7D%3C%2Fstyle%3E%3Cg%20id%3D%22i%22%3E%3Cpath%20d%3D%22M32%2032%20L480%2032%20L480%20128%20L32%20128%20Z%22%2F%3E%3Cpath%20d%3D%22M32%20192%20L288%20192%20L352%20288%20L32%20288%20Z%22%2F%3E%3Cpath%20d%3D%22M288%20352%20L480%20352%20L480%20448%20L352%20448%20Z%22%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E">
+<style>
+  :root {
+    --canvas: #14120f;
+    --rail: #191614;
+    --panel: #1c1917;
+    --panel-soft: #232020;
+    --line: #322c28;
+    --heading: #f2ece4;
+    --body: #ddd5cb;
+    --muted: #9b8f84;
+    --subtle: #6f665e;
+    /* Battoni Dev brand lime. This block is the source of truth for colour. */
+    --accent: #c0e021;
+    --accent-soft: #2a3210;
+    --code: #12100e;
+    --rail-width: 288px;
+
+    /* One hue per speaker: warm for people and Claude, cool for the machine. */
+    --role-you: #6fa8d6;
+    --role-claude: #d97757;
+    --role-tool: #85b06b;
+    --role-out: #7d746c;
+    --tint-you: #171d24;
+    --tint-claude: #1f1a17;
+    --tint-tool: #171c16;
+    --tint-out: #1a1918;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    overflow: hidden;
+    display: grid;
+    grid-template-columns: var(--rail-width) minmax(0, 1fr);
+    background: var(--canvas);
+    color: var(--body);
+    font: 15px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  body.railed-off { grid-template-columns: minmax(0, 1fr); }
+  body.railed-off #rail { display: none; }
+
+  /* ---- sidebar ---- */
+  #rail {
+    height: 100vh;
+    display: flex; flex-direction: column;
+    background: var(--rail);
+    border-right: 1px solid var(--line);
+    overflow: hidden;
+  }
+  #rail .rail-top { padding: 12px 12px 9px; border-bottom: 1px solid var(--line); }
+  /* O lockup, contornado: sem fonte externa, como o resto da pagina. */
+  #rail .logo { display: block; height: 38px; width: auto; fill: var(--accent);
+                margin: 4px auto 16px; }
+  #filter {
+    width: 100%; padding: 7px 10px;
+    background: var(--code); color: var(--body);
+    border: 1px solid var(--line); border-radius: 9px;
+    font: inherit; font-size: 13px;
+  }
+  #filter:focus { outline: none; border-color: var(--accent); }
+  .scope { display: flex; gap: 4px; margin-top: 9px; }
+  .scope button {
+    flex: 1; padding: 4px 0;
+    background: none; border: 1px solid var(--line); border-radius: 8px;
+    color: var(--muted); font: inherit; font-size: 11.5px; cursor: pointer;
+  }
+  .scope button:hover { color: var(--heading); }
+  .scope button.on { background: var(--accent-soft); border-color: var(--accent); color: var(--heading); }
+  .session.dragging {
+    opacity: .4; background: var(--panel-soft);
+    cursor: grabbing;
+  }
+  /* Without this the row's own content fires dragleave on every pixel. */
+  .session.dragging * { pointer-events: none; }
+  .session .badge {
+    flex: none; min-width: 15px; text-align: center;
+    font: 10px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--subtle); border: 1px solid var(--line); border-radius: 4px; padding: 2px 0;
+  }
+  .session.active .badge { color: var(--accent); border-color: var(--accent); }
+  .project > summary .pencil {
+    opacity: 0; background: none; border: 0; padding: 0 2px;
+    color: var(--subtle); font: inherit; font-size: 11px; cursor: pointer;
+  }
+  .project > summary:hover .pencil { opacity: 1; }
+  .project > summary .pencil:hover { color: var(--accent); }
+  .rename {
+    flex: 1; min-width: 0; padding: 2px 6px;
+    background: var(--code); color: var(--heading);
+    border: 1px solid var(--accent); border-radius: 6px;
+    font: inherit; font-size: 12.5px;
+  }
+  .rename:focus { outline: none; }
+  /* Square and radius-free, in the mark's own language. The native control is
+     too small to aim at and refuses the palette. */
+  input[type="checkbox"] {
+    appearance: none; -webkit-appearance: none;
+    width: 19px; height: 19px; margin: 0; flex: none;
+    background: var(--code);
+    border: 1.5px solid var(--line); border-radius: 0;
+    display: grid; place-content: center;
+    cursor: pointer;
+    transition: background .15s ease, border-color .15s ease;
+  }
+  /* The tick already exists when unchecked, merely hidden, so it scales in
+     rather than blinking into being. */
+  input[type="checkbox"]::after {
+    content: ""; width: 9px; height: 5px;
+    border: 2px solid var(--canvas); border-top: 0; border-right: 0;
+    transform: translateY(-1.5px) rotate(-45deg) scale(.4);
+    opacity: 0;
+    transition: opacity .12s ease, transform .16s cubic-bezier(.2, .9, .3, 1.3);
+  }
+  input[type="checkbox"]:hover { border-color: var(--accent); }
+  input[type="checkbox"]:checked { background: var(--accent); border-color: var(--accent); }
+  input[type="checkbox"]:checked::after {
+    opacity: 1; transform: translateY(-1.5px) rotate(-45deg) scale(1);
+  }
+  input[type="checkbox"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  #rail .follow {
+    display: flex; align-items: center; gap: 10px;
+    margin-top: 10px; font-size: 12.5px; color: var(--muted);
+    cursor: pointer; user-select: none;
+    transition: color .12s;
+  }
+  #rail .follow:hover { color: var(--body); }
+  #rail .follow:hover input[type="checkbox"] { border-color: var(--accent); }
+  #tree { flex: 1; overflow-y: auto; padding: 8px 8px 24px; }
+
+  /* Footer: the language picker does not compete with the search. */
+  .rail-foot {
+    flex: none; display: flex; gap: 4px;
+    padding: 9px 12px; border-top: 1px solid var(--line);
+  }
+  .rail-foot button {
+    flex: 1; padding: 4px 0;
+    background: none; border: 1px solid var(--line); border-radius: 8px;
+    color: var(--muted); font: inherit; font-size: 11.5px; cursor: pointer;
+  }
+  .rail-foot button:hover { color: var(--heading); }
+  .rail-foot button.on { background: var(--accent-soft); border-color: var(--accent); color: var(--heading); }
+  .project { margin-bottom: 4px; }
+  .project > summary {
+    list-style: none; cursor: pointer;
+    padding: 6px 8px; border-radius: 8px;
+    font-size: 12px; color: var(--muted);
+    display: flex; align-items: baseline; gap: 7px;
+    white-space: nowrap; overflow: hidden;
+  }
+  .project > summary::-webkit-details-marker { display: none; }
+  .project > summary:hover { background: var(--panel); color: var(--heading); }
+  .project > summary b {
+    color: var(--body); font-weight: 600; font-size: 12.5px;
+    overflow: hidden; text-overflow: ellipsis;
+  }
+  .project > summary .count { margin-left: auto; color: var(--subtle); font-size: 11px; }
+  .project > summary::before { content: "\25B8"; color: var(--subtle); font-size: 10px; }
+  .project[open] > summary::before { content: "\25BE"; }
+  .session {
+    display: flex; align-items: center; gap: 8px;
+    width: 100%; text-align: left;
+    padding: 6px 9px 6px 22px; margin: 1px 0;
+    background: none; border: 0; border-radius: 8px;
+    color: var(--muted); font: inherit; font-size: 12.5px;
+    cursor: pointer; overflow: hidden;
+  }
+  .session:hover { background: var(--panel); color: var(--body); }
+  .session.active { background: var(--accent-soft); color: var(--heading); }
+  .session .swatch { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--subtle); }
+  .session .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .session .name em { font-style: normal; color: var(--accent); }
+  .session .when { color: var(--subtle); font-size: 10.5px; flex: none; }
+  .session.live .when { color: var(--accent); }
+
+  /* ---- pane ---- */
+  #pane { min-width: 0; height: 100vh; display: flex; flex-direction: column; }
+  #top {
+    flex: none;
+    display: flex; align-items: center; gap: 11px; flex-wrap: nowrap;
+    padding: 11px 22px;
+    background: var(--rail);
+    border-bottom: 1px solid var(--line);
+    font-size: 12.5px; color: var(--muted);
+  }
+  #top .swatch { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); flex: none; }
+  /* The mark: a paragraph with a line snapped in two. See brand/BRAND.md.
+     It shows only while the list is hidden — with the list open the sidebar
+     lockup already carries the identity, and two marks would compete. */
+  #top .brand { display: none; width: 21.5px; height: 20px; flex: none; fill: var(--accent); }
+  body.railed-off #top .brand { display: block; }
+  #top .title { color: var(--heading); font-weight: 600; font-size: 14px; white-space: nowrap; }
+  /* Icon button. The list toggle uses a side-panel icon rather than a burger:
+     the mark is already three horizontal lines and the two would be confused. */
+  #top .iconbtn {
+    position: relative;
+    display: flex; align-items: center; justify-content: center;
+    width: 28px; height: 28px; padding: 0;
+    background: none; border: 1px solid transparent; border-radius: 7px;
+    color: var(--muted); cursor: pointer;
+    transition: color .12s, border-color .12s, background .12s;
+  }
+  #top .iconbtn svg {
+    width: 17px; height: 17px;
+    fill: none; stroke: currentColor; stroke-width: 1.6;
+    stroke-linecap: round; stroke-linejoin: round;
+  }
+  #top .iconbtn:hover { color: var(--heading); background: var(--panel-soft); border-color: var(--line); }
+  #top .iconbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  #top .iconbtn.done { color: var(--accent); }
+
+  /* Tooltip: hover and keyboard focus only, never on click. */
+  #top .tip {
+    position: absolute; top: calc(100% + 8px); left: 0;
+    z-index: 5; pointer-events: none;
+    opacity: 0; transform: translateY(-2px);
+    transition: opacity .12s, transform .12s;
+    background: var(--panel); color: var(--body);
+    border: 1px solid var(--line); border-radius: 7px;
+    padding: 6px 9px; white-space: nowrap;
+    width: max-content; max-width: 300px;
+    font-size: 11.5px; line-height: 1.5;
+  }
+  /* The id does not fit on one line, so it gets its own and may wrap. */
+  #top .tip b {
+    display: block; white-space: normal; word-break: break-all;
+    font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-weight: 400; color: var(--heading);
+  }
+  #top .iconbtn:hover .tip,
+  #top .iconbtn:focus-visible .tip { opacity: 1; transform: translateY(0); }
+  #top .meta {
+    flex: 1 1 auto; min-width: 0;
+    color: var(--subtle); white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis;
+  }
+  #top .title, #top button { flex: none; }
+
+  #scroller { flex: 1; min-height: 0; overflow-y: auto; }
+  #feed { max-width: 860px; margin: 0 auto; padding: 22px 22px 12vh; }
+  .msg { margin: 0 0 22px; }
+  .msg { --role: var(--muted); --tint: var(--panel); }
+  .msg.user { --role: var(--role-you); --tint: var(--tint-you); }
+  .msg.claude { --role: var(--role-claude); --tint: var(--tint-claude); }
+  .msg.tool { --role: var(--role-tool); --tint: var(--tint-tool); }
+  .msg.result { --role: var(--role-out); --tint: var(--tint-out); }
+
+  .who {
+    display: flex; align-items: center; gap: 7px;
+    font-size: 11px; letter-spacing: .09em; text-transform: uppercase;
+    color: var(--role); margin-bottom: 7px; font-weight: 600;
+  }
+  .who .mark { display: block; flex: none; }
+  /* Metadata, not a label: no small caps, no weight, no tracking. */
+  .who .stamp {
+    color: var(--subtle); font-size: 10.5px; font-weight: 400;
+    letter-spacing: 0; text-transform: none;
+    font-variant-numeric: tabular-nums;
+  }
+  .who .copy-msg {
+    margin-left: auto; opacity: 0; transition: opacity .12s;
+    letter-spacing: 0; text-transform: none; font-weight: 400;
+  }
+  .msg:hover .copy-msg { opacity: 1; }
+  .bubble {
+    background: var(--tint);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--role);
+    border-radius: 4px 14px 14px 4px;
+    padding: 13px 17px; overflow-wrap: anywhere;
+  }
+  .result .bubble { color: var(--muted); }
+  .bubble > *:first-child { margin-top: 0; }
+  .bubble > *:last-child { margin-bottom: 0; }
+  .bubble h3, .bubble h4 { color: var(--heading); font-size: 1.02em; margin: 1.1em 0 .45em; }
+  .bubble p { margin: 0 0 .75em; }
+  .bubble ul, .bubble ol { margin: 0 0 .75em; padding-left: 1.3em; }
+  .bubble blockquote {
+    margin: 0 0 .75em; padding-left: .8em;
+    border-left: 3px solid var(--line); color: var(--muted);
+  }
+  .bubble a { color: var(--accent); }
+  .scroller { overflow-x: auto; margin: 0 0 .8em; }
+  .bubble table { border-collapse: collapse; font-size: 13.5px; }
+  .bubble th, .bubble td {
+    border: 1px solid var(--line); padding: 5px 10px;
+    text-align: left; vertical-align: top; white-space: nowrap;
+  }
+  .bubble th { color: var(--heading); background: var(--panel-soft); font-weight: 600; }
+  code.inline {
+    background: var(--code); border: 1px solid var(--line);
+    border-radius: 5px; padding: .1em .35em;
+    font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+    overflow-wrap: anywhere;
+  }
+  .block { position: relative; margin: 0 0 .8em; }
+  .block pre {
+    margin: 0; padding: 12px 14px;
+    background: var(--code); border: 1px solid var(--line); border-radius: 10px;
+    overflow-x: auto; white-space: pre;
+    font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #e6ddd2;
+  }
+  button.copy {
+    background: var(--panel-soft); color: var(--muted);
+    border: 1px solid var(--line); border-radius: 7px;
+    padding: 3px 9px; font-size: 11px; cursor: pointer; font-family: inherit;
+  }
+  button.copy:hover { color: var(--heading); border-color: var(--accent); }
+  button.copy.done { color: var(--accent); border-color: var(--accent); }
+  .block button.copy { position: absolute; top: 7px; right: 7px; opacity: 0; transition: opacity .12s; }
+  .block:hover button.copy, .block button.copy.done { opacity: 1; }
+  .tool .bubble { padding: 9px 13px; }
+  .tool-head { display: flex; align-items: baseline; gap: 9px; font-size: 12.5px; }
+  .tool-head b { color: var(--role); font-weight: 600; }
+  .tool-head span { color: var(--muted); }
+  details.result summary { cursor: pointer; font-size: 12px; color: var(--muted); list-style: none; }
+  details.result summary::before { content: "\25B8  "; }
+  details.result[open] summary::before { content: "\25BE  "; }
+  .empty { color: var(--subtle); text-align: center; padding: 60px 0; font-size: 13px; }
+  .notice { padding: 10px 0 22px; }
+  .jump {
+    position: fixed; right: 24px; bottom: 24px; display: none;
+    background: var(--accent); color: #141413; border: 0; border-radius: 999px;
+    padding: 9px 16px; font-size: 12.5px; font-family: inherit; font-weight: 600;
+    cursor: pointer; box-shadow: 0 6px 18px rgba(0,0,0,.45);
+  }
+  .jump.show { display: block; }
+</style>
+</head>
+<body>
+
+<aside id="rail">
+  <div class="rail-top">
+    <svg class="logo" viewBox="0 0 1744 512" role="img" aria-label="pergula">
+      <g id="icon">
+        <path d="M32 32 L480 32 L480 128 L32 128 Z"/>
+        <path d="M32 192 L288 192 L352 288 L32 288 Z"/>
+        <path d="M288 352 L480 352 L480 448 L352 448 Z"/>
+      </g>
+      <g id="wordmark" transform="translate(608 315.0) scale(0.300000 -0.300000)">
+      <path d="M73 -200V494H186V429H203Q220 460 257.5 484.0Q295 508 365 508Q425 508 476.5 478.5Q528 449 559.0 392.0Q590 335 590 255V239Q590 159 559.0 102.0Q528 45 477.0 15.5Q426 -14 365 -14Q318 -14 286.5 -3.0Q255 8 235.5 26.0Q216 44 205 62H188V-200ZM331 86Q394 86 434.5 126.5Q475 167 475 242V252Q475 328 434.0 368.0Q393 408 331 408Q269 408 227.5 368.0Q186 328 186 252V242Q186 167 227.5 126.5Q269 86 331 86Z" transform="translate(0 0)"/>
+      <path d="M299 -14Q225 -14 168.5 17.5Q112 49 80.5 106.5Q49 164 49 241V253Q49 331 80.0 388.0Q111 445 167.0 476.5Q223 508 296 508Q368 508 422.0 476.5Q476 445 506.0 388.0Q536 331 536 255V214H165Q167 156 206.0 121.0Q245 86 302 86Q358 86 385.0 110.5Q412 135 426 166L521 117Q507 90 480.5 59.5Q454 29 410.0 7.5Q366 -14 299 -14ZM166 301H419Q415 350 381.5 379.0Q348 408 295 408Q240 408 207.0 379.0Q174 350 166 301Z" transform="translate(639 0)"/>
+      <path d="M73 0V494H186V437H203Q214 468 240.0 482.0Q266 496 302 496H362V394H300Q250 394 219.0 367.5Q188 341 188 286V0Z" transform="translate(1220 0)"/>
+      <path d="M49 245V260Q49 338 80.0 393.5Q111 449 163.0 478.5Q215 508 277 508Q347 508 383.5 483.0Q420 458 437 429H454V494H566V-94Q566 -143 538.0 -171.5Q510 -200 462 -200H130V-100H423Q452 -100 452 -70V73H435Q424 56 405.0 38.5Q386 21 355.0 9.0Q324 -3 277 -3Q215 -3 163.0 26.5Q111 56 80.0 111.5Q49 167 49 245ZM309 98Q371 98 412.0 137.5Q453 177 453 248V258Q453 330 412.5 369.0Q372 408 309 408Q247 408 205.5 369.0Q164 330 164 258V248Q164 177 205.5 137.5Q247 98 309 98Z" transform="translate(1611 0)"/>
+      <path d="M262 -8Q205 -8 161.0 17.5Q117 43 93.0 89.5Q69 136 69 198V494H183V207Q183 147 212.5 118.0Q242 89 296 89Q357 89 392.5 129.0Q428 169 428 244V494H542V0H430V69H413Q400 42 365.5 17.0Q331 -8 262 -8Z" transform="translate(2250 0)"/>
+      <path d="M73 0V700H188V0Z" transform="translate(2865 0)"/>
+      <path d="M226 -14Q174 -14 132.0 4.5Q90 23 65.5 58.0Q41 93 41 144Q41 194 65.5 228.0Q90 262 133.0 279.5Q176 297 231 297H374V327Q374 366 350.0 390.5Q326 415 275 415Q225 415 199.5 391.5Q174 368 166 331L60 366Q72 405 98.5 437.0Q125 469 169.0 488.5Q213 508 277 508Q374 508 429.5 459.5Q485 411 485 319V125Q485 95 513 95H555V0H474Q438 0 415.0 18.0Q392 36 392 67V69H375Q369 55 354.0 35.0Q339 15 308.5 0.5Q278 -14 226 -14ZM245 80Q302 80 338.0 112.5Q374 145 374 200V210H238Q201 210 178.0 194.0Q155 178 155 147Q155 117 179.0 98.5Q203 80 245 80Z" transform="translate(3126 0)"/>
+    </g>
+    </svg>
+
+    <input id="filter" type="search" data-i18n-ph="filterPlaceholder" autocomplete="off">
+
+    <div class="scope">
+      <button id="scopeLive" type="button" data-i18n-title="activeTitle" data-i18n="active"></button>
+
+      <button id="scopeAll" type="button" data-i18n="all"></button>
+    </div>
+
+    <label class="follow"><input type="checkbox" id="follow" checked> <span data-i18n="followLive"></span></label>
+
+    <label class="follow"><input type="checkbox" id="showTools" checked> <span data-i18n="showCommands"></span></label>
+
+    <label class="follow"><input type="checkbox" id="showResults"> <span data-i18n="showOutputs"></span></label>
+  </div>
+
+  <nav id="tree"></nav>
+
+  <div class="rail-foot">
+    <button id="langPt" type="button">português</button>
+    <button id="langEn" type="button">english</button>
+  </div>
+</aside>
+
+<div id="pane">
+  <div id="top">
+    <svg class="brand" viewBox="32 32 448 416" aria-hidden="true">
+      <path d="M32 32 L480 32 L480 128 L32 128 Z"/>
+      <path d="M32 192 L288 192 L352 288 L32 288 Z"/>
+      <path d="M288 352 L480 352 L480 448 L352 448 Z"/>
+    </svg>
+
+    <button class="iconbtn" id="railToggle" type="button" aria-label="ocultar lista">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="3.5" y="4.5" width="17" height="15" rx="2"/>
+        <path d="M9.5 4.5v15"/>
+      </svg>
+      <span class="tip" id="railTip">ocultar lista &#183; cmd+B</span>
+    </button>
+
+    <span class="swatch" id="swatch"></span>
+
+    <span class="title" id="title" data-i18n="connecting"></span>
+
+    <button class="iconbtn" id="copySid" type="button" data-i18n-aria="copyIdLabel">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="9" y="9" width="11" height="11" rx="2"/>
+        <path d="M15 6.5V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h.5"/>
+      </svg>
+      <span class="tip" id="sidTip" data-i18n="sessionId"></span>
+    </button>
+
+    <span class="meta" id="meta"></span>
+  </div>
+
+  <main id="scroller">
+    <div id="feed"><div class="empty" data-i18n="waiting"></div></div>
+  </main>
+</div>
+
+<button class="jump" id="jump" data-i18n="newMessages"></button>
+
+<script>
+const COLORS = {
+  red: '#e06c62', green: '#7fb069', yellow: '#e0b35c', blue: '#6ba3d6',
+  magenta: '#c17fd0', cyan: '#5fb3b3', orange: '#e08b4f', purple: '#9b7fd0',
+  pink: '#e07fa8', teal: '#5fb3a3', gray: '#8a8078', grey: '#8a8078',
+  white: '#ddd5cb', default: '#c0e021',
+};
+
+const feed = document.getElementById('feed');
+const scroller = document.getElementById('scroller');
+const tree = document.getElementById('tree');
+const filter = document.getElementById('filter');
+const follow = document.getElementById('follow');
+const jump = document.getElementById('jump');
+const swatch = document.getElementById('swatch');
+const titleEl = document.getElementById('title');
+const sidEl = document.getElementById('sidTip');
+const railTip = document.getElementById('railTip');
+const metaEl = document.getElementById('meta');
+const copySid = document.getElementById('copySid');
+const railToggle = document.getElementById('railToggle');
+const toggles = {
+  tools: document.getElementById('showTools'),
+  results: document.getElementById('showResults'),
+};
+
+let indexToken = '';
+let stateToken = '';
+let projects = [];
+let activeId = null;
+let selectedId = null;
+let messages = [];
+let rendered = [];
+let total = 0;
+let limit = 400;
+let session = null;
+let pinnedToBottom = true;
+let collapsed = new Set(JSON.parse(localStorage.getItem('pergula:collapsed') || '[]'));
+// LANGUAGE
+
+const STRINGS = {
+  pt: {
+    filterPlaceholder: 'filtrar projeto ou sessão',
+    active: 'ativas', all: 'todas',
+    activeTitle: 'abertas num terminal agora',
+    followLive: 'seguir a sessão ativa',
+    showCommands: 'comandos', showOutputs: 'saídas',
+    hideList: 'ocultar lista', showList: 'mostrar lista',
+    connecting: 'conectando…', waiting: 'aguardando…',
+    newMessages: '↓ novas mensagens',
+    sessionId: 'ID da sessão', sessionIdCopy: 'ID da sessão · copiar',
+    idCopied: 'id copiado', copyFailed: 'não foi possível copiar',
+    copyIdLabel: 'copiar id da sessão',
+    copy: 'copiar', copied: 'copiado', copyAll: 'copiar tudo',
+    roleYou: 'você', roleClaude: 'claude', roleCommand: 'comando', roleOutput: 'saída',
+    line: 'linha', lines: 'linhas',
+    showingLast: 'mostrando as últimas {n} de {total} mensagens  ',
+    loadAll: 'carregar tudo', loading: 'carregando…',
+    nothingYet: 'nada para mostrar ainda',
+    noLiveSession: 'nenhuma sessão aberta no terminal',
+    noRecentSession: 'nenhuma sessão nas últimas 2 horas',
+    noSession: 'nenhuma sessão',
+    openInTerminal: 'aberta no terminal · pid {pid} · {status}',
+    noStatus: 'sem status', autoName: '(nome automático)',
+    renameHint: 'renomear projeto (vazio volta ao caminho)',
+    now: 'agora', month: 'mes',
+  },
+  en: {
+    filterPlaceholder: 'filter project or session',
+    active: 'active', all: 'all',
+    activeTitle: 'open in a terminal right now',
+    followLive: 'follow the live session',
+    showCommands: 'commands', showOutputs: 'output',
+    hideList: 'hide list', showList: 'show list',
+    connecting: 'connecting…', waiting: 'waiting…',
+    newMessages: '↓ new messages',
+    sessionId: 'session id', sessionIdCopy: 'session id · copy',
+    idCopied: 'id copied', copyFailed: 'could not copy',
+    copyIdLabel: 'copy session id',
+    copy: 'copy', copied: 'copied', copyAll: 'copy all',
+    roleYou: 'you', roleClaude: 'claude', roleCommand: 'command', roleOutput: 'output',
+    line: 'line', lines: 'lines',
+    showingLast: 'showing the last {n} of {total} messages  ',
+    loadAll: 'load all', loading: 'loading…',
+    nothingYet: 'nothing to show yet',
+    noLiveSession: 'no session open in a terminal',
+    noRecentSession: 'no session in the last 2 hours',
+    noSession: 'no session',
+    openInTerminal: 'open in a terminal · pid {pid} · {status}',
+    noStatus: 'no status', autoName: '(automatic name)',
+    renameHint: 'rename project (empty restores the path)',
+    now: 'now', month: 'mo',
+  },
+};
+
+// The browser's language decides on the first visit; after that, the choice.
+let lang = localStorage.getItem('pergula:lang')
+  || ((navigator.language || '').toLowerCase().startsWith('pt') ? 'pt' : 'en');
+
+function t(key, vars) {
+  let text = (STRINGS[lang] || STRINGS.en)[key] || STRINGS.en[key] || key;
+  if (vars) {
+    for (const name of Object.keys(vars)) text = text.replace('{' + name + '}', vars[name]);
+  }
+  return text;
+}
+
+// Always opens on "active": when the window opens, what matters is what is
+// running in a terminal right now. Switching to "all" holds while the tab is
+// open and does not come back on the next load.
+let scope = 'live';
+let visibleRows = [];
+
+// Manual session order, per project: { slug: [id, id, ...] }. A project with no
+// entry here keeps the server's order, by recent activity.
+const manualOrder = JSON.parse(localStorage.getItem('pergula:order') || '{}');
+let hasRegistry = true;
+
+const ACTIVE_WINDOW = 2 * 3600;
+const scopeLive = document.getElementById('scopeLive');
+const langPt = document.getElementById('langPt');
+const langEn = document.getElementById('langEn');
+const scopeAll = document.getElementById('scopeAll');
+
+for (const [name, box] of Object.entries(toggles)) {
+  const saved = localStorage.getItem('pergula:' + name);
+  if (saved !== null) box.checked = saved === '1';
+  box.addEventListener('change', () => {
+    localStorage.setItem('pergula:' + name, box.checked ? '1' : '0');
+    rendered = [];
+    draw();
+  });
+}
+
+if (localStorage.getItem('pergula:rail') === '0') {
+  document.body.classList.add('railed-off');
+  labelRail(true);
+}
+
+// HELPERS
+
+function escapeHtml(text) {
+  return text.replace(/[&<>"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[char]);
+}
+
+function colorOf(name) {
+  return COLORS[name] || COLORS.default;
+}
+
+function ago(epoch) {
+  const seconds = Math.max(0, Date.now() / 1000 - epoch);
+  if (seconds < 60) return t('now');
+  if (seconds < 3600) return Math.floor(seconds / 60) + 'min';
+  if (seconds < 86400) return Math.floor(seconds / 3600) + 'h';
+  if (seconds < 2592000) return Math.floor(seconds / 86400) + 'd';
+  return Math.floor(seconds / 2592000) + t('month');
+}
+
+function locale() {
+  return lang === 'pt' ? 'pt-BR' : 'en-US';
+}
+
+// Time of day. A long session spans days, so the date appears when it is not
+// today — the hour alone would be ambiguous. The full stamp lives in the hover.
+function stampParts(iso) {
+  if (!iso) return null;
+  const when = new Date(iso);
+  if (Number.isNaN(when.getTime())) return null;
+
+  const time = when.toLocaleTimeString(locale(), { hour: '2-digit', minute: '2-digit' });
+  const today = new Date();
+  const sameDay = when.getDate() === today.getDate()
+    && when.getMonth() === today.getMonth()
+    && when.getFullYear() === today.getFullYear();
+
+  const short = sameDay
+    ? time
+    : when.toLocaleDateString(locale(), { day: '2-digit', month: '2-digit' }) + ' ' + time;
+
+  return { short: short, full: when.toLocaleString(locale()) };
+}
+
+function shortPath(path) {
+  return path.replace(/^\/Users\/[^/]+/, '~');
+}
+
+function renderInline(text) {
+  let html = escapeHtml(text);
+  html = html.replace(/`([^`]+)`/g, (_all, code) => '<code class="inline">' + code + '</code>');
+  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  html = html.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+  return html;
+}
+
+function renderTable(lines) {
+  const rows = lines
+    .map((line) => line.trim().replace(/^\||\|$/g, '').split('|').map((cell) => cell.trim()))
+    .filter((cells) => !cells.every((cell) => /^:?-{2,}:?$/.test(cell)));
+
+  if (!rows.length) return '';
+
+  const head = '<tr>' + rows[0].map((cell) => '<th>' + renderInline(cell) + '</th>').join('') + '</tr>';
+  const body = rows.slice(1)
+    .map((cells) => '<tr>' + cells.map((cell) => '<td>' + renderInline(cell) + '</td>').join('') + '</tr>')
+    .join('');
+
+  return '<div class="scroller"><table><thead>' + head + '</thead><tbody>' + body + '</tbody></table></div>';
+}
+
+function renderProse(text) {
+  const out = [];
+  let list = null;
+  let table = null;
+
+  const flush = () => {
+    if (list) { out.push('</' + list + '>'); list = null; }
+  };
+  const flushTable = () => {
+    if (table) { out.push(renderTable(table)); table = null; }
+  };
+
+  for (const rawLine of text.split('\n')) {
+    const line = rawLine.trimEnd();
+
+    if (!line.trim()) { flush(); flushTable(); continue; }
+
+    if (/^\s*\|.*\|\s*$/.test(line)) { flush(); (table = table || []).push(line); continue; }
+    flushTable();
+
+    const heading = line.match(/^(#{1,6})\s+(.*)$/);
+    if (heading) {
+      flush();
+      const level = heading[1].length <= 3 ? 'h3' : 'h4';
+      out.push('<' + level + '>' + renderInline(heading[2]) + '</' + level + '>');
+      continue;
+    }
+
+    const bullet = line.match(/^\s*[-*]\s+(.*)$/);
+    if (bullet) {
+      if (list !== 'ul') { flush(); out.push('<ul>'); list = 'ul'; }
+      out.push('<li>' + renderInline(bullet[1]) + '</li>');
+      continue;
+    }
+
+    const numbered = line.match(/^\s*\d+\.\s+(.*)$/);
+    if (numbered) {
+      if (list !== 'ol') { flush(); out.push('<ol>'); list = 'ol'; }
+      out.push('<li>' + renderInline(numbered[1]) + '</li>');
+      continue;
+    }
+
+    const quote = line.match(/^>\s?(.*)$/);
+    if (quote) { flush(); out.push('<blockquote>' + renderInline(quote[1]) + '</blockquote>'); continue; }
+
+    flush();
+    out.push('<p>' + renderInline(line) + '</p>');
+  }
+
+  flush();
+  flushTable();
+  return out.join('');
+}
+
+function copyButton(payload, label) {
+  const button = document.createElement('button');
+  button.className = 'copy';
+  button.type = 'button';
+  button.textContent = label;
+  button.addEventListener('click', (event) => {
+    event.stopPropagation();
+    navigator.clipboard.writeText(payload).then(() => {
+      button.textContent = t('copied');
+      button.classList.add('done');
+      setTimeout(() => { button.textContent = label; button.classList.remove('done'); }, 1400);
+    });
+  });
+  return button;
+}
+
+function codeBlock(source, language) {
+  const wrap = document.createElement('div');
+  wrap.className = 'block';
+  const pre = document.createElement('pre');
+  const code = document.createElement('code');
+  code.textContent = source;
+  if (language) code.dataset.lang = language;
+  pre.appendChild(code);
+  wrap.appendChild(pre);
+  wrap.appendChild(copyButton(source, t('copy')));
+  return wrap;
+}
+
+function renderMarkdown(container, source) {
+  // Odd-indexed segments are fenced code; the fence language is the first line.
+  source.split('```').forEach((segment, index) => {
+    if (index % 2 === 0) {
+      if (!segment.trim()) return;
+      const prose = document.createElement('div');
+      prose.innerHTML = renderProse(segment);
+      while (prose.firstChild) container.appendChild(prose.firstChild);
+      return;
+    }
+
+    const newline = segment.indexOf('\n');
+    const first = newline === -1 ? '' : segment.slice(0, newline).trim();
+    const language = /^[a-zA-Z0-9+#._-]*$/.test(first) ? first : '';
+    const body = language === first && newline !== -1 ? segment.slice(newline + 1) : segment;
+    container.appendChild(codeBlock(body.replace(/\n+$/, ''), language));
+  });
+}
+
+// The Claude mark: a burst of tapered rays. Drawn here rather than fetched, so
+// the page stays a single file with no network at all.
+function claudeMark(size) {
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('width', size);
+  svg.setAttribute('height', size);
+  svg.setAttribute('aria-hidden', 'true');
+  svg.classList.add('mark');
+
+  const RAYS = 11;
+  for (let index = 0; index < RAYS; index += 1) {
+    const ray = document.createElementNS(NS, 'path');
+    // A slim petal: a point at the centre, widest around mid-radius, a point at
+    // the tip. Widening it near the centre instead turns the middle into a blob.
+    ray.setAttribute('d', 'M12 1.5 L12.95 6.2 L12 12 L11.05 6.2 Z');
+    ray.setAttribute('fill', 'currentColor');
+    ray.setAttribute('transform', 'rotate(' + (index * 360 / RAYS).toFixed(2) + ' 12 12)');
+    svg.appendChild(ray);
+  }
+
+  return svg;
+}
+
+function label(message) {
+  if (message.role === 'user') return t('roleYou');
+  if (message.kind === 'tool_use') return t('roleCommand');
+  if (message.kind === 'tool_result') return t('roleOutput');
+  return t('roleClaude');
+}
+
+function visible(message) {
+  if (message.kind === 'tool_use') return toggles.tools.checked;
+  if (message.kind === 'tool_result') return toggles.results.checked;
+  return message.kind === 'text';
+}
+
+function speaker(message) {
+  if (message.role === 'user') return 'user';
+  if (message.kind === 'tool_result') return 'result';
+  if (message.kind === 'tool_use') return 'tool';
+  return 'claude';
+}
+
+// A command shows its name and arguments; its output collapses behind a summary;
+// anything else is prose and gets the markdown renderer.
+function fillBubble(bubble, message) {
+  if (message.kind === 'tool_use') {
+    const head = document.createElement('div');
+    head.className = 'tool-head';
+
+    const name = document.createElement('b');
+    name.textContent = message.name;
+    head.appendChild(name);
+
+    if (message.subtitle) {
+      const note = document.createElement('span');
+      note.textContent = message.subtitle;
+      head.appendChild(note);
+    }
+
+    bubble.appendChild(head);
+    if (message.text) bubble.appendChild(codeBlock(message.text, 'bash'));
+    return;
+  }
+
+  if (message.kind === 'tool_result') {
+    const details = document.createElement('details');
+    details.className = 'result';
+
+    const summary = document.createElement('summary');
+    const lines = message.text.split('\n').length;
+    summary.textContent = lines + ' ' + t(lines === 1 ? 'line' : 'lines');
+
+    details.appendChild(summary);
+    details.appendChild(codeBlock(message.text, ''));
+    bubble.appendChild(details);
+    return;
+  }
+
+  renderMarkdown(bubble, message.text);
+}
+
+function buildMessage(message) {
+  const article = document.createElement('article');
+  const kind = speaker(message);
+  article.className = 'msg ' + kind;
+
+  const who = document.createElement('div');
+  who.className = 'who';
+  if (kind === 'claude') who.appendChild(claudeMark(14));
+  who.appendChild(document.createTextNode(label(message)));
+
+  const stamp = stampParts(message.ts);
+  if (stamp) {
+    const when = document.createElement('time');
+    when.className = 'stamp';
+    when.dateTime = message.ts;
+    when.textContent = stamp.short;
+    when.title = stamp.full;
+    who.appendChild(when);
+  }
+
+  if (message.text) {
+    const button = copyButton(message.text, t('copyAll'));
+    button.classList.add('copy-msg');
+    who.appendChild(button);
+  }
+  article.appendChild(who);
+
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+
+  fillBubble(bubble, message);
+
+  article.appendChild(bubble);
+  return article;
+}
+
+function atBottom() {
+  return scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= 90;
+}
+
+function toBottom(smooth) {
+  scroller.scrollTo({ top: scroller.scrollHeight, behavior: smooth ? 'smooth' : 'auto' });
+}
+
+function windowNotice() {
+  const showingEverything = !limit || total <= messages.length;
+  if (showingEverything) return null;
+
+  const notice = document.createElement('div');
+  notice.className = 'empty notice';
+  notice.textContent = t('showingLast', { n: messages.length, total: total });
+
+  const button = document.createElement('button');
+  button.className = 'copy';
+  button.type = 'button';
+  button.textContent = t('loadAll');
+  button.addEventListener('click', () => {
+    limit = 0;
+    stateToken = '';
+    button.textContent = t('loading');
+  });
+  notice.appendChild(button);
+  return notice;
+}
+
+function draw() {
+  const shown = messages.filter(visible);
+  feed.replaceChildren();
+
+  const notice = windowNotice();
+  if (notice) feed.appendChild(notice);
+
+  if (!shown.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = t('nothingYet');
+    feed.appendChild(empty);
+    rendered = [];
+    return;
+  }
+
+  for (const message of shown) feed.appendChild(buildMessage(message));
+  rendered = messages;
+}
+
+// Transcripts only ever grow, so the common case is "a few new turns arrived".
+// Rebuilding thousands of nodes for that would make the page crawl.
+function appendable(next) {
+  const lostGround = !rendered.length || next.length < rendered.length;
+  if (lostGround) return false;
+  const anchor = rendered.length - 1;
+  return next[anchor] && next[anchor].text === rendered[anchor].text
+    && next[anchor].kind === rendered[anchor].kind;
+}
+
+function drawDelta(next) {
+  const fresh = next.slice(rendered.length).filter(visible);
+  for (const message of fresh) feed.appendChild(buildMessage(message));
+  rendered = next;
+}
+
+function projectName(project) {
+  return project.label || shortPath(project.path);
+}
+
+function matches(project, meta, needle) {
+  if (!needle) return true;
+  const hay = projectName(project) + ' ' + project.path + ' ' + meta.title + ' ' + meta.id;
+  return hay.toLowerCase().includes(needle);
+}
+
+// "Ativas" means a claude process is open in a terminal right now, which the
+// CLI records in ~/.claude/sessions. Whatever you are reading stays on the list
+// regardless, so it never vanishes under you mid-sentence.
+function inScope(meta) {
+  if (scope === 'all') return true;
+  if (meta.id === selectedId) return true;
+  if (hasRegistry) return meta.live;
+  return (Date.now() / 1000 - meta.mtime) <= ACTIVE_WINDOW;
+}
+
+// The manual order rules; whatever is not in it follows, in the server's order.
+function applyOrder(slug, hits) {
+  const manual = manualOrder[slug];
+  if (!manual) return hits;
+
+  const rank = new Map(manual.map((id, index) => [id, index]));
+  const placed = [];
+  const fresh = [];
+  for (const meta of hits) (rank.has(meta.id) ? placed : fresh).push(meta);
+  placed.sort((a, b) => rank.get(a.id) - rank.get(b.id));
+  return placed.concat(fresh);
+}
+
+// Where to drop: the first row whose middle has passed the cursor.
+function rowBelow(group, y) {
+  const rows = [...group.querySelectorAll('.session:not(.dragging)')];
+  return rows.find((row) => {
+    const box = row.getBoundingClientRect();
+    return y < box.top + box.height / 2;
+  }) || null;
+}
+
+function makeSortable(group, slug) {
+  group.addEventListener('dragstart', (event) => {
+    const row = event.target.closest('.session');
+    if (!row) return;
+    row.classList.add('dragging');
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', row.dataset.id);
+  });
+
+  group.addEventListener('dragover', (event) => {
+    const row = group.querySelector('.session.dragging');
+    if (!row) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+    const below = rowBelow(group, event.clientY);
+    if (below) {
+      group.insertBefore(row, below);
+      return;
+    }
+
+    group.appendChild(row);
+  });
+
+  group.addEventListener('dragend', () => {
+    const row = group.querySelector('.session.dragging');
+    if (!row) return;
+    row.classList.remove('dragging');
+    manualOrder[slug] = [...group.querySelectorAll('.session')].map((el) => el.dataset.id);
+    localStorage.setItem('pergula:order', JSON.stringify(manualOrder));
+    drawTree();
+  });
+}
+
+// A renamed project is set in italics; an automatic name stays plain.
+function fillName(name, meta) {
+  if (!meta.renamed) {
+    name.textContent = meta.title;
+    return;
+  }
+
+  const strong = document.createElement('em');
+  strong.textContent = meta.title;
+  name.appendChild(strong);
+}
+
+function buildSessionRow(meta, ordinal) {
+  const row = document.createElement('button');
+  row.type = 'button';
+  row.className = 'session'
+    + (meta.id === selectedId ? ' active' : '')
+    + (meta.live ? ' live' : '');
+  row.title = meta.id
+    + (meta.live
+      ? '\n' + t('openInTerminal', { pid: meta.pid, status: meta.status || t('noStatus') })
+      : '')
+    + (meta.renamed ? '' : '\n' + t('autoName'));
+  row.draggable = true;
+  row.dataset.id = meta.id;
+
+  if (ordinal <= 9) {
+    const badge = document.createElement('span');
+    badge.className = 'badge';
+    badge.textContent = ordinal;
+    row.appendChild(badge);
+  }
+
+  const dot = document.createElement('span');
+  dot.className = 'swatch';
+  if (meta.color) dot.style.background = colorOf(meta.color);
+  row.appendChild(dot);
+
+  const name = document.createElement('span');
+  name.className = 'name';
+  fillName(name, meta);
+  row.appendChild(name);
+
+  const when = document.createElement('span');
+  when.className = 'when';
+  when.textContent = (meta.live ? '● ' : '') + ago(meta.mtime);
+  row.appendChild(when);
+
+  row.addEventListener('click', () => onPick(meta.id));
+  return row;
+}
+
+function startRename(project, summary, name) {
+  const input = document.createElement('input');
+  input.className = 'rename';
+  input.value = project.label || '';
+  input.placeholder = shortPath(project.path);
+  summary.replaceChild(input, name);
+  summary.dataset.editing = '1';
+  input.focus();
+  input.select();
+
+  const stop = (event) => event.stopPropagation();
+  input.addEventListener('click', stop);
+  input.addEventListener('mousedown', stop);
+
+  const finish = (save) => {
+    delete summary.dataset.editing;
+    if (!save) { drawTree(); return; }
+
+    fetch('/api/rename', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ slug: project.slug, label: input.value.trim() }),
+    }).then(() => {
+      project.label = input.value.trim();
+      indexToken = '';
+      drawTree();
+    }).catch(() => drawTree());
+  };
+
+  input.addEventListener('keydown', (event) => {
+    event.stopPropagation();
+    if (event.key === 'Enter') { event.preventDefault(); finish(true); }
+    if (event.key === 'Escape') { event.preventDefault(); finish(false); }
+  });
+  input.addEventListener('blur', () => finish(true));
+}
+
+function drawTree() {
+  // Never yank the tree out from under someone naming a project or dragging a
+  // session. It is the same rule as "never yank the page while text is selected"
+  // further down: a new message arriving cannot cost what a person was in the
+  // middle of. The tree goes a few seconds stale; whoever finishes redraws.
+  if (tree.querySelector('[data-editing], .dragging')) return;
+
+  const needle = filter.value.trim().toLowerCase();
+  tree.replaceChildren();
+  visibleRows = [];
+
+  for (const project of projects) {
+    const hits = project.sessions.filter((meta) => matches(project, meta, needle) && inScope(meta));
+    if (!hits.length) continue;
+
+    const holdsActive = hits.some((meta) => meta.id === selectedId);
+    const group = document.createElement('details');
+    group.className = 'project';
+    group.open = needle ? true : (holdsActive || !collapsed.has(project.slug));
+
+    const summary = document.createElement('summary');
+    summary.title = project.path;
+    const name = document.createElement('b');
+    name.textContent = projectName(project);
+    summary.appendChild(name);
+
+    const pencil = document.createElement('button');
+    pencil.className = 'pencil';
+    pencil.type = 'button';
+    pencil.textContent = '✎';
+    pencil.title = t('renameHint');
+    pencil.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      startRename(project, summary, name);
+    });
+    summary.appendChild(pencil);
+
+    const count = document.createElement('span');
+    count.className = 'count';
+    count.textContent = hits.length;
+    summary.appendChild(count);
+
+    summary.addEventListener('click', (event) => {
+      if (summary.dataset.editing) event.preventDefault();
+    });
+    name.addEventListener('dblclick', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      startRename(project, summary, name);
+    });
+
+    group.appendChild(summary);
+
+    group.addEventListener('toggle', () => {
+      if (filter.value.trim()) return;
+      if (group.open) collapsed.delete(project.slug);
+      if (!group.open) collapsed.add(project.slug);
+      localStorage.setItem('pergula:collapsed', JSON.stringify([...collapsed]));
+    });
+
+    for (const meta of applyOrder(project.slug, hits)) {
+      visibleRows.push(meta.id);
+      group.appendChild(buildSessionRow(meta, visibleRows.length));
+    }
+
+    makeSortable(group, project.slug);
+
+    tree.appendChild(group);
+  }
+
+  if (!tree.children.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = scope === 'live' && !filter.value.trim()
+      ? t(hasRegistry ? 'noLiveSession' : 'noRecentSession')
+      : 'nada encontrado';
+    tree.appendChild(empty);
+  }
+}
+
+function paintLang() {
+  document.documentElement.lang = lang === 'pt' ? 'pt-BR' : 'en';
+  for (const node of document.querySelectorAll('[data-i18n]')) {
+    node.textContent = t(node.dataset.i18n);
+  }
+  for (const node of document.querySelectorAll('[data-i18n-ph]')) {
+    node.placeholder = t(node.dataset.i18nPh);
+  }
+  for (const node of document.querySelectorAll('[data-i18n-title]')) {
+    node.title = t(node.dataset.i18nTitle);
+  }
+  for (const node of document.querySelectorAll('[data-i18n-aria]')) {
+    node.setAttribute('aria-label', t(node.dataset.i18nAria));
+  }
+  langPt.classList.toggle('on', lang === 'pt');
+  langEn.classList.toggle('on', lang === 'en');
+}
+
+function setLang(next) {
+  if (next === lang) return;
+  lang = next;
+  localStorage.setItem('pergula:lang', next);
+  paintLang();
+  labelRail(document.body.classList.contains('railed-off'));
+  // The text lives inside messages and rows already drawn, so this has to
+  // rebuild rather than swap a few loose labels.
+  rendered = [];
+  drawTop();
+  drawTree();
+  draw();
+}
+
+function paintScope() {
+  scopeLive.classList.toggle('on', scope === 'live');
+  scopeAll.classList.toggle('on', scope === 'all');
+}
+
+function setScope(next) {
+  scope = next;
+  paintScope();
+  drawTree();
+}
+
+function drawTop() {
+  if (!session) {
+    titleEl.textContent = t('noSession');
+    sidEl.dataset.for = '';
+    sidEl.textContent = t('sessionId');
+    metaEl.textContent = '';
+    return;
+  }
+
+  titleEl.textContent = session.title;
+  if (sidEl.dataset.for !== session.id) {
+    sidEl.dataset.for = session.id;
+    sidEl.innerHTML = escapeHtml(t('sessionIdCopy')) + '<b></b>';
+    sidEl.querySelector('b').textContent = session.id;
+  }
+  swatch.style.background = colorOf(session.color);
+  metaEl.textContent = shortPath(session.cwd || '') + (session.branch ? '  ·  ' + session.branch : '');
+}
+
+// EVENTS
+
+scroller.addEventListener('scroll', () => {
+  pinnedToBottom = atBottom();
+  if (pinnedToBottom) jump.classList.remove('show');
+});
+
+jump.addEventListener('click', () => {
+  toBottom(true);
+  pinnedToBottom = true;
+  jump.classList.remove('show');
+});
+
+filter.addEventListener('input', drawTree);
+
+filter.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return;
+  filter.value = '';
+  filter.blur();
+  drawTree();
+});
+
+langPt.addEventListener('click', () => setLang('pt'));
+langEn.addEventListener('click', () => setLang('en'));
+
+scopeLive.addEventListener('click', () => setScope('live'));
+scopeAll.addEventListener('click', () => setScope('all'));
+
+// cmd/ctrl + 1..9 jumps to the Nth session on the list, in the order shown.
+// Both modifiers are bound: in a normal Chrome tab cmd+N belongs to the tab
+// strip, and only the --open window is free of it.
+window.addEventListener('keydown', (event) => {
+  const hasModifier = event.metaKey || event.ctrlKey;
+  if (!hasModifier) return;
+  if (event.altKey) return;
+
+  if (event.key === 'b') {
+    event.preventDefault();
+    toggleRail();
+    return;
+  }
+
+  if (event.key === 'f') {
+    event.preventDefault();
+    filter.focus();
+    filter.select();
+    return;
+  }
+
+  const ordinal = Number(event.key);
+  const inRange = Number.isInteger(ordinal) && ordinal >= 1 && ordinal <= 9;
+  if (!inRange) return;
+
+  const id = visibleRows[ordinal - 1];
+  if (!id) return;
+
+  event.preventDefault();
+  onPick(id);
+  toBottom(false);
+});
+
+follow.addEventListener('change', () => {
+  if (!follow.checked) return;
+  selectedId = null;
+  stateToken = '';
+  pinnedToBottom = true;
+  schedulePoll(0);
+});
+
+function labelRail(off) {
+  const text = t(off ? 'showList' : 'hideList');
+  railTip.textContent = text + ' \u00b7 cmd+B';
+  railToggle.setAttribute('aria-label', text);
+}
+
+function toggleRail() {
+  const off = document.body.classList.toggle('railed-off');
+  labelRail(off);
+  localStorage.setItem('pergula:rail', off ? '0' : '1');
+}
+
+railToggle.addEventListener('click', toggleRail);
+
+copySid.addEventListener('click', () => {
+  if (!session) return;
+  const previous = sidEl.innerHTML;
+
+  // Without the catch, a refusal from the clipboard gave no sign at all: the
+  // click simply did nothing visible.
+  const restore = () => setTimeout(() => {
+    sidEl.innerHTML = previous;
+    copySid.classList.remove('done');
+  }, 1400);
+
+  navigator.clipboard.writeText(session.id).then(() => {
+    sidEl.textContent = t('idCopied');
+    copySid.classList.add('done');
+    restore();
+  }).catch(() => {
+    sidEl.textContent = t('copyFailed');
+    restore();
+  });
+});
+
+function onPick(id) {
+  selectedId = id;
+  follow.checked = false;
+  limit = 400;
+  rendered = [];
+  stateToken = '';
+  pinnedToBottom = true;
+  drawTree();
+  schedulePoll(0);
+}
+
+function onIndex(payload) {
+  indexToken = payload.token;
+  hasRegistry = payload.hasRegistry !== false;
+  projects = payload.projects;
+  activeId = payload.active;
+  drawTree();
+}
+
+function onState(payload) {
+  const sameSession = session && payload.session && session.id === payload.session.id;
+  const next = payload.messages;
+
+  stateToken = payload.token;
+  session = payload.session;
+  total = payload.total || next.length;
+  drawTop();
+
+  // Never yank the page while text is selected — that is the whole point here.
+  const selecting = !window.getSelection().isCollapsed;
+  const wasPinned = pinnedToBottom;
+
+  const canAppend = sameSession && appendable(next);
+  messages = next;
+
+  if (canAppend) drawDelta(next);
+  if (!canAppend) draw();
+
+  const shouldStayAtBottom = wasPinned && !selecting;
+  if (shouldStayAtBottom) toBottom(false);
+  if (!wasPinned) jump.classList.add('show');
+}
+
+// Switching session cannot wait for the next tick: that was up to 700 ms of dead
+// time before the fetch even began. schedulePoll(0) serves it immediately.
+let pollTimer = null;
+let pollRun = 0;
+
+function schedulePoll(delay) {
+  clearTimeout(pollTimer);
+  pollTimer = setTimeout(pollState, delay);
+}
+
+async function pollState() {
+  const run = ++pollRun;
+  try {
+    const target = follow.checked ? '' : (selectedId || '');
+    const url = '/api/state?session=' + encodeURIComponent(target)
+      + '&limit=' + limit
+      + '&since=' + encodeURIComponent(stateToken);
+    const response = await fetch(url);
+
+    // A newer switch began while this response was in flight. Applying it now
+    // would paint the old session over the one the person just chose.
+    if (run !== pollRun) return;
+
+    if (response.status === 200) {
+      const payload = await response.json();
+      if (run !== pollRun) return;
+      const changedSession = !session || !payload.session || session.id !== payload.session.id;
+      onState(payload);
+      const following = follow.checked && payload.session;
+      if (following) {
+        selectedId = payload.session.id;
+        if (changedSession) drawTree();
+      }
+    }
+  } catch (error) { /* servidor fora; o próximo tick tenta de novo */ }
+  if (run === pollRun) schedulePoll(700);
+}
+
+async function pollIndex() {
+  try {
+    const response = await fetch('/api/index?since=' + encodeURIComponent(indexToken));
+    if (response.status === 200) onIndex(await response.json());
+  } catch (error) { /* idem */ }
+  setTimeout(pollIndex, 2500);
+}
+
+paintLang();
+paintScope();
+pollState();
+pollIndex();
+</script>
+</body>
+</html>
+"""
+
+
+# LAUNCHING
+
+
+def probe(port: int) -> bool:
+    """Is one of ours already listening there?"""
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/ping", timeout=1.5) as response:
+            return response.headers.get("X-Pergula") == "1"
+    except (urllib.error.URLError, OSError):
+        return False
+
+
+def open_window(address: str) -> None:
+    chrome = "/Applications/Google Chrome.app"
+    if Path(chrome).is_dir():
+        subprocess.Popen(
+            ["open", "-na", chrome, "--args", f"--app={address}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return
+
+    subprocess.Popen(["open", address], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def launchctl(*arguments: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["launchctl", *arguments], capture_output=True, text=True)
+
+
+def install_agent(port: int) -> None:
+    script = Path(__file__).resolve()
+    if not Path(AGENT_PYTHON).exists():
+        sys.exit(f"pergula: {AGENT_PYTHON} nao existe — instale as Command Line Tools")
+
+    target = f"gui/{os.getuid()}"
+    already_ours = launchctl("print", f"{target}/{AGENT_LABEL}").returncode == 0
+
+    # A foreign listener would make the agent fail to bind, and KeepAlive would
+    # retry that failure forever without ever saying so.
+    foreign_listener = probe(port) and not already_ours
+    if foreign_listener:
+        sys.exit(
+            f"pergula: ja existe algo escutando em 127.0.0.1:{port}.\n"
+            "  Pare esse processo (ctrl+c no terminal dele) e rode de novo,\n"
+            f"  ou escolha outra porta: pergula --install --port {port + 1}"
+        )
+
+    AGENT_PLIST.parent.mkdir(parents=True, exist_ok=True)
+    AGENT_LOG.parent.mkdir(parents=True, exist_ok=True)
+
+    AGENT_PLIST.write_bytes(plistlib.dumps({
+        "Label": AGENT_LABEL,
+        "ProgramArguments": [AGENT_PYTHON, str(script), "--serve", "--port", str(port)],
+        "RunAtLoad": True,
+        "KeepAlive": True,
+        "ProcessType": "Background",
+        "StandardOutPath": str(AGENT_LOG),
+        "StandardErrorPath": str(AGENT_LOG),
+    }))
+
+    launchctl("bootout", f"{target}/{AGENT_LABEL}")
+    result = launchctl("bootstrap", target, str(AGENT_PLIST))
+    if result.returncode != 0:
+        sys.exit(f"pergula: launchctl bootstrap falhou — {result.stderr.strip() or result.stdout.strip()}")
+
+    print(f"pergula: agent installed at {AGENT_PLIST}")
+    print(f"  interpretador: {AGENT_PYTHON}")
+    print(f"  log: {AGENT_LOG}")
+    print("  sobe no login e reinicia sozinho se cair")
+
+    for _ in range(12):
+        if probe(port):
+            print(f"\n  serving at http://127.0.0.1:{port}")
+            print("  agora, de qualquer terminal, basta: pergula")
+            return
+
+        time.sleep(0.5)
+
+    print(f"\n  WARNING: nothing answered on {port} after 6s — see {AGENT_LOG}")
+
+
+def uninstall_agent() -> None:
+    result = launchctl("bootout", f"gui/{os.getuid()}/{AGENT_LABEL}")
+    removed = False
+    if AGENT_PLIST.exists():
+        AGENT_PLIST.unlink()
+        removed = True
+
+    failed = not removed and result.returncode != 0
+    if failed:
+        print("pergula: no agent installed")
+        return
+
+    print(f"pergula: agent removed ({AGENT_PLIST})")
+
+
+def report_status(port: int) -> None:
+    address = f"http://127.0.0.1:{port}"
+    print(f"pergula: {address} — {'serving' if probe(port) else 'nothing listening'}")
+
+    installed = AGENT_PLIST.exists()
+    print(f"  login agent: {'installed' if installed else 'not installed'}")
+    if not installed:
+        return
+
+    result = launchctl("print", f"gui/{os.getuid()}/{AGENT_LABEL}")
+    if result.returncode != 0:
+        print("  estado: plist no disco, mas nao carregado (rode pergula --install)")
+        return
+
+    seen = set()
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        field = stripped.split("=")[0].strip()
+        interesting = field in ("state", "pid", "last exit code") and field not in seen
+        if interesting:
+            seen.add(field)
+            print(f"  {stripped}")
+
+
+# EVENTS
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--port", type=int, default=7373)
+    parser.add_argument("--here", action="store_true", help="only list sessions from the current directory")
+    parser.add_argument("--serve", action="store_true", help="always serve in the foreground")
+    parser.add_argument("--open", action="store_true", help="open the window (implied when a server is up)")
+    parser.add_argument("--install", action="store_true", help="run at login as a background agent")
+    parser.add_argument("--uninstall", action="store_true", help="remove that agent")
+    parser.add_argument("--status", action="store_true", help="say whether anything is listening")
+    arguments = parser.parse_args()
+
+    if arguments.uninstall:
+        uninstall_agent()
+        return
+
+    if arguments.install:
+        install_agent(arguments.port)
+        return
+
+    if arguments.status:
+        report_status(arguments.port)
+        return
+
+    if not PROJECTS.is_dir():
+        sys.exit(f"pergula: {PROJECTS} does not exist — is Claude Code installed?")
+
+    address = f"http://127.0.0.1:{arguments.port}"
+
+    # Someone is already serving, so this invocation is a request for a window,
+    # not for a second server. This is what makes `pergula` work from any
+    # terminal once the agent is installed.
+    already_serving = not arguments.serve and probe(arguments.port)
+    if already_serving:
+        open_window(address)
+        print(f"pergula: {address} (already serving)")
+        return
+
+    Handler.scope = Path.cwd() if arguments.here else None
+
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", arguments.port), Handler)
+    except OSError as error:
+        sys.exit(f"pergula: cannot bind {address} — {error}")
+
+    started = time.time()
+    index = build_index(Handler.scope)
+    sessions = sum(len(group["sessions"]) for group in index["projects"])
+    print(f"pergula: {address}", flush=True)
+    print(f"  {len(index['projects'])} projetos, {sessions} sessoes indexadas em {time.time() - started:.1f}s", flush=True)
+    print("  ctrl+c para parar", flush=True)
+
+    wants_window = arguments.open or not arguments.serve
+    if wants_window:
+        open_window(address)
+
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\npergula: encerrado")
+
+
+if __name__ == "__main__":
+    main()

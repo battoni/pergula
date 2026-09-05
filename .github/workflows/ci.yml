@@ -1,0 +1,48 @@
+name: CI
+
+# pergula has no build and no dependencies, so CI is short. Everything worth
+# gating lives in the test suite, which also enforces the house conventions, the
+# translation table, and that the shipped mark matches what the page inlines.
+#
+# The linters under brand/marks/ are deliberately NOT run here: they check every
+# mark ever explored, and the rejected ones are kept as record and still fail on
+# purpose. Run them by hand while exploring — `make check`.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: tests and conventions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+
+      - name: Test
+        run: python3 test_pergula.py
+
+      - name: The product still starts
+        run: |
+          timeout 10 python3 ./pergula --serve --port 7999 &
+          for _ in $(seq 20); do
+            curl -fsS http://127.0.0.1:7999/api/ping >/dev/null 2>&1 && break
+            sleep 0.5
+          done
+          curl -fsS http://127.0.0.1:7999/api/ping
+          curl -fsS -o /dev/null http://127.0.0.1:7999/manifest.webmanifest
+          curl -fsS -o /dev/null http://127.0.0.1:7999/icon.png
+          echo "  serves, and the manifest and icon routes answer"

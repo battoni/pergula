@@ -1,0 +1,13 @@
+# Build artefacts from the brand scripts. Everything here regenerates:
+#   python3 brand/marks/contact-sheet.py "<glob>"
+#   python3 brand/color/proofs.py
+#   python3 ~/.claude/skills/battoni-new-brand/scripts/size-ladder.py <dir>
+brand/marks/**/*.html
+brand/marks/**/.ladder/
+brand/color/proofs.html
+brand/color/px/
+
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store

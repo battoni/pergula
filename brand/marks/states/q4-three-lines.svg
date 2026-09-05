@@ -1,0 +1,7 @@
+<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+<g id="icon">
+<path fill="#c0e021" d="M32 32 L480 32 L480 128 L32 128 Z"/>
+<path fill="#c0e021" d="M32 192 L288 192 L352 288 L32 288 Z"/>
+<path fill="#c0e021" d="M288 352 L480 352 L480 448 L352 448 Z"/>
+</g>
+</svg>

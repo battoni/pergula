@@ -1,0 +1,7 @@
+<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="pergula">
+  <g id="icon">
+    <rect x="52" y="400" width="198" height="26" fill="#7d746c" />
+    <rect x="88" y="146" width="82" height="254" fill="#d97757" />
+    <polygon points="56,96 456,160 456,214 56,150" fill="#d98b63" />
+  </g>
+</svg>

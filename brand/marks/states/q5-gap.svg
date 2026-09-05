@@ -1,0 +1,8 @@
+<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <g id="icon">
+    <path fill="#c0e021" d="M32 32H480V96H32Z"/>
+    <path fill="#c0e021" d="M32 160H288V224H32Z"/>
+    <path fill="#c0e021" d="M288 288H480V352H288Z"/>
+    <path fill="#c0e021" d="M32 416H480V480H32Z"/>
+  </g>
+</svg>

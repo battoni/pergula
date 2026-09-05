@@ -1,0 +1,10 @@
+<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <g id="icon">
+    <path fill="#c0e021" d="M32 16 H256 L224 64 H32 Z"/>
+    <path fill="#c0e021" d="M320 64 H480 V112 H288 Z"/>
+    <path fill="#c0e021" d="M32 176 H176 L144 224 H32 Z"/>
+    <path fill="#c0e021" d="M240 176 H320 V224 H208 Z"/>
+    <path fill="#c0e021" d="M32 320 H480 V368 H32 Z"/>
+    <path fill="#c0e021" d="M32 432 H320 V480 H32 Z"/>
+  </g>
+</svg>

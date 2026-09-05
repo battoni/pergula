@@ -1,0 +1,12 @@
+<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <g id="icon">
+    <rect x="46" y="44" width="64" height="104" fill="#c0e021"/>
+    <path d="M166 44 H378 A52 52 0 0 1 378 148 H166 Z" fill="#c0e021"/>
+
+    <rect x="402" y="204" width="64" height="104" fill="#c0e021"/>
+    <path d="M346 204 H242 A52 52 0 0 0 242 308 H346 Z" fill="#c0e021"/>
+
+    <rect x="46" y="364" width="64" height="104" fill="#c0e021"/>
+    <path d="M166 364 H414 A52 52 0 0 1 414 468 H166 Z" fill="#c0e021"/>
+  </g>
+</svg>

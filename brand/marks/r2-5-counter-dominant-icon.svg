@@ -1,0 +1,8 @@
+<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+<g id="icon">
+<rect x="96" y="0" width="64" height="512" fill="#c0e021"/>
+<rect x="160" y="0" width="192" height="64" fill="#c0e021"/>
+<rect x="288" y="0" width="64" height="256" fill="#c0e021"/>
+<rect x="96" y="192" width="320" height="64" fill="#c0e021"/>
+</g>
+</svg>
