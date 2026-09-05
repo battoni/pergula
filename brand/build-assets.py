@@ -79,21 +79,25 @@ def build_knockout():
                f'  <g id="icon" fill="{INK}">\n    {icon_shapes(fill=False)}\n  </g>\n</svg>\n')
 
 
-def build_header():
+def build_card(name, width_px, ratio):
+    """The lockup centred on ink, at 2:1. The README header and the GitHub
+    social preview are the same composition at two sizes, so they share this
+    rather than drifting apart."""
+    height_px = width_px // 2
     lockup = (HERE / "pergula-lockup.svg").read_text()
-    width = int(re.search(r'viewBox="0 0 (\d+)', lockup).group(1))
+    art_w = int(re.search(r'viewBox="0 0 (\d+)', lockup).group(1))
     inner = lockup.split(">", 1)[1].rsplit("</svg>", 1)[0].strip()
 
-    scale = (1024 * 0.74) / width
-    source = HERE / ".header.svg"
+    scale = (width_px * ratio) / art_w
+    source = HERE / ".card.svg"
     source.write_text(
-        '<svg viewBox="0 0 1024 512" xmlns="http://www.w3.org/2000/svg">'
-        f'<rect width="1024" height="512" fill="{INK}"/>'
-        f'<g transform="translate({(1024 - width * scale) / 2:.1f} '
-        f'{(512 - 512 * scale) / 2:.1f}) scale({scale:.4f})">{inner}</g></svg>')
+        f'<svg viewBox="0 0 {width_px} {height_px}" xmlns="http://www.w3.org/2000/svg">'
+        f'<rect width="{width_px}" height="{height_px}" fill="{INK}"/>'
+        f'<g transform="translate({(width_px - art_w * scale) / 2:.1f} '
+        f'{(height_px - 512 * scale) / 2:.1f}) scale({scale:.4f})">{inner}</g></svg>')
 
-    subprocess.run(["rsvg-convert", "-w", "1024", "-h", "512", str(source),
-                    "-o", str(ASSETS / "readme-header.png")], check=True)
+    subprocess.run(["rsvg-convert", "-w", str(width_px), "-h", str(height_px),
+                    str(source), "-o", str(ASSETS / name)], check=True)
     source.unlink()
 
 
@@ -129,7 +133,8 @@ def main():
                        ("pwa-512.png", 512), ("avatar-512.png", 512)):
         raster(tile, ASSETS / name, size)
 
-    build_header()
+    build_card("readme-header.png", 1024, 0.74)
+    build_card("social-preview.png", 1280, 0.62)
     build_ico(favicon)
 
     print(f"  {len(list(ASSETS.iterdir()))} assets rebuilt in {ASSETS}")

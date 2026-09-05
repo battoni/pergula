@@ -62,7 +62,8 @@ product was built against, drawn. Full specification in [`BRAND.md`](BRAND.md).
 | `assets/favicon.svg` | Carries its own `prefers-color-scheme` query |
 | `assets/favicon.ico` | 16/32/48, fixed `#6d8214` — legible on both browser chromes |
 | `assets/apple-touch-icon.png` · `pwa-192` · `pwa-512` · `avatar-512` | Generated from `tile.svg` |
-| `assets/readme-header.png` | 1024 × 512 |
+| `assets/readme-header.png` | 1024 × 512, above the prose in the root README |
+| `assets/social-preview.png` | 1280 × 640, the GitHub card. Upload is web-only — Settings → General |
 | `assets/pergula-knockout.svg` | The one official reversed form |
 
 Everything in `assets/` is generated from `pergula-icon.svg`. Nothing is drawn by
