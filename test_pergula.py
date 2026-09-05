@@ -365,6 +365,21 @@ class Conventions(unittest.TestCase):
         offenders = [n for n, line in enumerate(self.lines, 1) if line != line.rstrip()]
         self.assertEqual(offenders, [])
 
+    def test_only_the_pt_table_speaks_portuguese(self):
+        """The page is bilingual through STRINGS; everything else — terminal
+        output, comments, CSS — ships in English. The CLI messages were the half
+        that got left behind once already."""
+        opens = next(n for n, l in enumerate(self.lines) if re.match(r"^\s*pt: \{", l))
+        closes = next(n for n, l in enumerate(self.lines[opens:], opens) if re.match(r"^\s*en: \{", l))
+
+        stopwords = r"\b(n[ãa]o|para|com|uma|que|est[áa]|s[ãa]o|j[áa]|voc[êe]|rode|basta|sobe|cair|encerrado|interpretador|carregado|falhou|projetos|sess[õo]es|p[áa]gina|arquivo)\b"
+        offenders = [
+            f"{n}: {line.strip()}"
+            for n, line in enumerate(self.lines, 1)
+            if not opens + 1 <= n <= closes + 1 and re.search(stopwords, line, re.I)
+        ]
+        self.assertEqual(offenders, [])
+
 
 class ShippedMark(unittest.TestCase):
     """brand/pergula-icon.svg against the spec in brand/BRAND.md. The exploration

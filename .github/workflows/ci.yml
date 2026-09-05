@@ -26,17 +26,21 @@ jobs:
     name: tests and conventions
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.9'
 
       - name: Test
         run: python3 test_pergula.py
 
+      # pergula refuses to start when ~/.claude/projects is missing, which is the
+      # right answer for a machine without Claude Code and the wrong one for a
+      # runner. The empty directory is the "installed, no sessions yet" state.
       - name: The product still starts
         run: |
+          mkdir -p "$HOME/.claude/projects"
           timeout 10 python3 ./pergula --serve --port 7999 &
           for _ in $(seq 20); do
             curl -fsS http://127.0.0.1:7999/api/ping >/dev/null 2>&1 && break

@@ -744,7 +744,7 @@ PAGE = r"""<!doctype html>
     overflow: hidden;
   }
   #rail .rail-top { padding: 12px 12px 9px; border-bottom: 1px solid var(--line); }
-  /* O lockup, contornado: sem fonte externa, como o resto da pagina. */
+  /* The lockup, outlined: no external font, like the rest of the page. */
   #rail .logo { display: block; height: 38px; width: auto; fill: var(--accent);
                 margin: 4px auto 16px; }
   #filter {
@@ -2144,7 +2144,7 @@ def launchctl(*arguments: str) -> subprocess.CompletedProcess:
 def install_agent(port: int) -> None:
     script = Path(__file__).resolve()
     if not Path(AGENT_PYTHON).exists():
-        sys.exit(f"pergula: {AGENT_PYTHON} nao existe — instale as Command Line Tools")
+        sys.exit(f"pergula: {AGENT_PYTHON} does not exist — install the Command Line Tools")
 
     target = f"gui/{os.getuid()}"
     already_ours = launchctl("print", f"{target}/{AGENT_LABEL}").returncode == 0
@@ -2154,9 +2154,9 @@ def install_agent(port: int) -> None:
     foreign_listener = probe(port) and not already_ours
     if foreign_listener:
         sys.exit(
-            f"pergula: ja existe algo escutando em 127.0.0.1:{port}.\n"
-            "  Pare esse processo (ctrl+c no terminal dele) e rode de novo,\n"
-            f"  ou escolha outra porta: pergula --install --port {port + 1}"
+            f"pergula: something is already listening on 127.0.0.1:{port}.\n"
+            "  Stop it (ctrl+c in its terminal) and run this again,\n"
+            f"  or pick another port: pergula --install --port {port + 1}"
         )
 
     AGENT_PLIST.parent.mkdir(parents=True, exist_ok=True)
@@ -2175,17 +2175,17 @@ def install_agent(port: int) -> None:
     launchctl("bootout", f"{target}/{AGENT_LABEL}")
     result = launchctl("bootstrap", target, str(AGENT_PLIST))
     if result.returncode != 0:
-        sys.exit(f"pergula: launchctl bootstrap falhou — {result.stderr.strip() or result.stdout.strip()}")
+        sys.exit(f"pergula: launchctl bootstrap failed — {result.stderr.strip() or result.stdout.strip()}")
 
     print(f"pergula: agent installed at {AGENT_PLIST}")
-    print(f"  interpretador: {AGENT_PYTHON}")
+    print(f"  interpreter: {AGENT_PYTHON}")
     print(f"  log: {AGENT_LOG}")
-    print("  sobe no login e reinicia sozinho se cair")
+    print("  runs at login, restarted if it dies")
 
     for _ in range(12):
         if probe(port):
             print(f"\n  serving at http://127.0.0.1:{port}")
-            print("  agora, de qualquer terminal, basta: pergula")
+            print("  from any terminal now, just run: pergula")
             return
 
         time.sleep(0.5)
@@ -2219,7 +2219,7 @@ def report_status(port: int) -> None:
 
     result = launchctl("print", f"gui/{os.getuid()}/{AGENT_LABEL}")
     if result.returncode != 0:
-        print("  estado: plist no disco, mas nao carregado (rode pergula --install)")
+        print("  state: plist on disk but not loaded (run pergula --install)")
         return
 
     seen = set()
@@ -2283,8 +2283,8 @@ def main() -> None:
     index = build_index(Handler.scope)
     sessions = sum(len(group["sessions"]) for group in index["projects"])
     print(f"pergula: {address}", flush=True)
-    print(f"  {len(index['projects'])} projetos, {sessions} sessoes indexadas em {time.time() - started:.1f}s", flush=True)
-    print("  ctrl+c para parar", flush=True)
+    print(f"  {len(index['projects'])} projects, {sessions} sessions indexed in {time.time() - started:.1f}s", flush=True)
+    print("  ctrl+c to stop", flush=True)
 
     wants_window = arguments.open or not arguments.serve
     if wants_window:
@@ -2293,7 +2293,7 @@ def main() -> None:
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\npergula: encerrado")
+        print("\npergula: stopped")
 
 
 if __name__ == "__main__":
