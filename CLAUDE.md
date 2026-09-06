@@ -24,6 +24,7 @@ Never `cp` by hand — `make deploy` runs the checks first, and the agent needs 
 | `test_pergula.py` | Standard-library tests. `make test` |
 | `brand/` | The identity and the reasoning behind it. Start at `brand/concept.md` |
 | `brand/marks/` | Every mark explored across four rounds, with the verdict on each |
+| `docs/` | README screenshots. Recapture by hand; nothing generates them |
 
 ## Conventions
 

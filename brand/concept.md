@@ -51,9 +51,9 @@ restoration of a property text was supposed to have all along.
 
 Lifting a passage out of a session and putting it into an email, an issue, a
 document — intact. Every code block carries a copy button; whole messages carry
-`copiar tudo`. The product's output is not a file, it is **a quotation**.
+`copy all`. The product's output is not a file, it is **a quotation**.
 
-*Evidenced — `copiar`, `copiar tudo`, `copiar id` in the interface.*
+*Evidenced — `copy`, `copy all`, `copy session id` in the interface.*
 
 ### 4. The porch (*a varanda*)
 
@@ -99,7 +99,8 @@ per-pid registry, never guessed:
 > *"It is the only honest answer to 'which sessions are open in a terminal right
 > now' — no process table, no reading another process's environment."*
 
-The word in the interface is `ativas`. Note the standard being applied: not "the
+The word in the interface is `active` (`ativas` in Portuguese). Note the
+standard being applied: not "the
 best available guess" but **the only honest answer**.
 
 *Evidenced — `LIVE_PATH` and its comment.*
@@ -116,7 +117,7 @@ session never steals the view from a live one: *"a finished session should not
 steal the view."* **The reader's place is protected against the product's own
 tidiness.**
 
-*Evidenced — the `ativas` filter and `pick_session`.*
+*Evidenced — the `active` filter and `pick_session`.*
 
 ### 10. The machine boundary (*o limite da máquina*)
 

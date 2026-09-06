@@ -14,6 +14,8 @@ pergula serves the same transcripts as a plain web page on `127.0.0.1`, where
 text selects the way text is supposed to select and every code block has a copy
 button.
 
+![Reading a session in pergula](docs/reading.png)
+
 ## Install
 
 ```sh
@@ -41,15 +43,35 @@ pergula --here       only list sessions from the current directory
 
 Default port is `7373`.
 
-In the page: `cmd+B` hides the session list, `cmd+1` through `cmd+9` jump to the
-nth session shown.
+## Keyboard
+
+| | |
+| --- | --- |
+| `cmd/ctrl + B` | hide or show the session list |
+| `cmd/ctrl + F` | focus the filter |
+| `cmd/ctrl + 1` … `9` | jump to the nth session on the list, in the order shown |
+| `esc` in the filter | clear it and let go of it |
+| `enter` / `esc` while renaming | keep the project name, or discard it |
+
+Both modifiers are bound on purpose. In an ordinary Chrome tab `cmd+1` belongs to
+the tab strip and never reaches the page; only the window pergula opens for
+itself is free of that, so `ctrl` is there for everyone else.
+
+Renaming a project starts on a double-click on its name, or on the pencil that
+appears when you hover it. Sessions reorder by dragging, and the order is
+remembered per project.
+
+Every code block has a copy button, and each message has `copy all`. Both appear
+on hover, so they are never in the way of reading.
+
+![The copy button on a code block](docs/copying.png)
 
 ## What it shows
 
 A sidebar groups every session by project. Sessions carry the name and the colour
 you gave them with `/rename` and `/color`, because the CLI writes both into the
-transcript. **ativas** are sessions with a Claude process open in a terminal right
-now — read from the CLI's own per-pid registry in `~/.claude/sessions`, not
+transcript. **active** sessions are the ones with a Claude process open in a
+terminal right now — read from the CLI's own per-pid registry in `~/.claude/sessions`, not
 guessed from the process table.
 
 Whatever you are reading stays on the list regardless, so it never vanishes under
@@ -58,6 +80,16 @@ you mid-sentence. The page never scrolls itself while text is selected.
 Project nicknames live in `~/.claude/pergula-names.json`, next to the transcripts
 they rename, so they survive reinstalls and are trivial to inspect or delete by
 hand.
+
+## The name
+
+*Pergula* is Latin for the light frame of beams that throws a roof out from the
+wall of a house — a porch. A covered place **outside** the building, from which
+you look back at what happened inside.
+
+That is the product in one word. The work happened in the terminal; this is
+where you stand to read it. It is not another room of the house, and it changes
+nothing indoors — it only gives you somewhere to sit and look back.
 
 ## What it does not do
 
