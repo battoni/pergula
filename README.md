@@ -124,6 +124,22 @@ The list is `~/.claude/pergula-favourites.json`, an ordered array of slugs. It
 follows a retitle and forgets a deleted snippet, and a star pointing at a file
 you removed by hand simply stops appearing.
 
+## Keeping the Mac awake
+
+An agent left working stops when the machine sleeps, which is a poor way to find
+out that it was never finished. The button at the bottom of the sidebar holds
+sleep off for one, two, four or eight hours, and shows what is left of that time
+while it does.
+
+It is `caffeinate -disu -t` and nothing more — the tool that ships with macOS.
+The `-i` is the one that matters: it holds off the idle sleep that would stop the
+agents. The `-d` keeps the display up as well, which is what makes it visible
+that something is holding the machine.
+
+Clicking it again lets the Mac sleep. So does the deadline running out, and so
+does `make deploy`, which restarts the agent and takes the child process with it.
+There is no way to leave it on by accident and no way to leave it on forever.
+
 ## The name
 
 *Pergula* is Latin for the light frame of beams that throws a roof out from the
@@ -139,9 +155,9 @@ nothing indoors — it only gives you somewhere to sit and look back.
 It never writes a byte back to a transcript, and never sends one anywhere. It
 reads them.
 
-The only things it writes are yours: project nicknames and the snippet library,
-both plain files under `~/.claude/`, both readable, editable and deletable
-without this program.
+The only things it writes are yours: project nicknames, the snippet library and
+the caffeinate deadline, all plain files under `~/.claude/`, all readable,
+editable and deletable without this program.
 
 Nothing leaves the machine — no account, no sync, no telemetry, no network call
 of any kind. Even the Claude mark in the interface is drawn in JavaScript rather

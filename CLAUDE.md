@@ -83,6 +83,14 @@ file: `~/.claude/pergula-favourites.json` holds slugs, so anything that changes 
 slug has to move the star with it. `write_snippet` and `erase_snippet` already
 do; a third way to move a file would need the same.
 
+**The caffeinate is a child process, not a file.** The button in the sidebar
+footer runs `caffeinate -disu -t`; `~/.claude/pergula-caffeine.json` is only a
+mirror, so a restart can find the orphan it left behind. `make deploy` kickstarts
+the agent and launchd takes the child with it, so `adopt_caffeine` kills whatever
+the file names — after checking with `ps` that the pid is still a `caffeinate`,
+because a pid gets reused. The `-i` is the flag that matters: without it the Mac
+sleeps anyway and the agents stop with it.
+
 **Transcripts only ever grow.** `parse_transcript` relies on that to parse
 incrementally from a saved byte offset. The offset bookkeeping fails silently, so
 change it only with the tests in front of you.

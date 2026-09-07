@@ -30,6 +30,7 @@ import json
 import os
 import plistlib
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -77,6 +78,14 @@ LIVE_PATH = Path.home() / ".claude" / "sessions"
 
 # Fallback for installs with no session registry: treat recent writes as live.
 FALLBACK_WINDOW = 2 * 3600
+
+# Holding the Mac awake. An agent left working stops when the machine sleeps,
+# so the reader that is open anyway can keep it up for a few hours. The child
+# process is the truth; the file only exists so a restart can find the orphan
+# it left behind and clear the deadline the page would otherwise still show.
+CAFFEINE_PATH = Path.home() / ".claude" / "pergula-caffeine.json"
+CAFFEINE_HOURS = (1, 2, 4, 8)
+CAFFEINE_LIMIT = 12
 
 # The app icon, embedded rather than kept beside the script: pergula is one
 # file with nothing next to it, and that is the point. Source of truth for the
@@ -177,6 +186,11 @@ _MESSAGE_CACHE: dict[str, tuple[int, list[dict]]] = {}
 # back-and-forth between terminals.
 MESSAGE_CACHE_LIMIT = 8
 _CACHE_LOCK = threading.Lock()
+
+# One assertion at a time. A second `caffeinate` would keep the Mac awake
+# behind the one the page knows about, with no way to reach it.
+_CAFFEINE = {"child": None, "until": 0.0}
+_CAFFEINE_LOCK = threading.Lock()
 
 
 # HELPERS
@@ -363,6 +377,97 @@ def live_sessions() -> dict:
 
 def live_stamp(live: dict) -> str:
     return ",".join(f"{session}:{data['status']}" for session, data in sorted(live.items()))
+
+
+def save_caffeine(until: float, pid: int) -> None:
+    body = json.dumps({"until": int(until), "pid": pid}, indent=2)
+    CAFFEINE_PATH.write_text(body, encoding="utf-8")
+
+
+def owns_pid(pid: int) -> bool:
+    """A pid outlives the process that held it, so ask what answers to this one
+    before signalling it. Killing a stranger to tidy up would be worse than
+    leaving a stray `caffeinate` running."""
+    probe = subprocess.run(["ps", "-p", str(pid), "-o", "comm="],
+                           capture_output=True, text=True)
+    return probe.stdout.strip().endswith("caffeinate")
+
+
+def caffeine_reading() -> dict:
+    """A deadline of zero means nothing is holding the Mac awake. The child is
+    asked rather than the clock, because `caffeinate -t` ends on its own and the
+    page must not go on counting down for a process that already exited.
+    Callers hold _CAFFEINE_LOCK."""
+    child = _CAFFEINE["child"]
+    finished = child is None or child.poll() is not None
+    if finished:
+        _CAFFEINE["child"] = None
+        _CAFFEINE["until"] = 0.0
+
+    return {"until": int(_CAFFEINE["until"]), "hours": list(CAFFEINE_HOURS)}
+
+
+def drop_caffeine() -> None:
+    """Ends the assertion, if there is one. Callers hold _CAFFEINE_LOCK."""
+    child = _CAFFEINE["child"]
+    if child is not None:
+        child.terminate()
+
+    _CAFFEINE["child"] = None
+    _CAFFEINE["until"] = 0.0
+
+
+def caffeine_state() -> dict:
+    with _CAFFEINE_LOCK:
+        return caffeine_reading()
+
+
+def start_caffeine(hours: float) -> dict:
+    seconds = int(max(0.25, min(hours, CAFFEINE_LIMIT)) * 3600)
+    with _CAFFEINE_LOCK:
+        drop_caffeine()
+
+        # -d holds the display, -i the idle sleep, -s the system sleep on mains
+        # and -u says a user is present. Without -i the Mac sleeps anyway and
+        # the agents stop with it, which is the whole point of the button.
+        _CAFFEINE["child"] = subprocess.Popen(
+            ["caffeinate", "-disu", "-t", str(seconds)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        _CAFFEINE["until"] = time.time() + seconds
+        save_caffeine(_CAFFEINE["until"], _CAFFEINE["child"].pid)
+
+        return caffeine_reading()
+
+
+def stop_caffeine() -> dict:
+    with _CAFFEINE_LOCK:
+        drop_caffeine()
+        save_caffeine(0.0, 0)
+
+        return caffeine_reading()
+
+
+def adopt_caffeine() -> None:
+    """Restarting the agent takes the child with it — launchd kills the whole
+    job — but the file it wrote outlives the process. Whatever is recorded there
+    is either already dead or an orphan the page can no longer stop, so it goes
+    and the deadline is cleared."""
+    try:
+        data = json.loads(CAFFEINE_PATH.read_text(encoding="utf-8"))
+        pid = int(data.get("pid") or 0) if isinstance(data, dict) else 0
+    except (OSError, ValueError, json.JSONDecodeError):
+        return
+
+    stray = pid > 0 and owns_pid(pid)
+    if stray:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+
+    save_caffeine(0.0, 0)
 
 
 def load_names() -> dict:
@@ -785,6 +890,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_payload(200, base64.b64decode(ICON_B64), "image/png")
             return
 
+        if parsed.path == "/api/caffeine":
+            self.send_ok(caffeine_state())
+            return
+
         if parsed.path == "/api/ping":
             self.send_payload(200, b'{"ok":true}', "application/json")
             return
@@ -852,6 +961,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/snippet": self.write_snippet,
             "/api/snippet/delete": self.erase_snippet,
             "/api/favourite": self.star_snippet,
+            "/api/caffeine": self.set_caffeine,
         }
         route = routes.get(urlparse(self.path).path)
         if not route:
@@ -864,6 +974,20 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         route(payload)
+
+    def set_caffeine(self, payload: dict):
+        """How many hours to stay awake, or nothing at all to sleep again."""
+        try:
+            hours = float(payload.get("hours") or 0)
+        except (TypeError, ValueError):
+            self.send_bad()
+            return
+
+        if hours <= 0:
+            self.send_ok(stop_caffeine())
+            return
+
+        self.send_ok(start_caffeine(hours))
 
     def rename_project(self, payload: dict):
         slug = str(payload.get("slug") or "")
@@ -1176,9 +1300,14 @@ PAGE = r"""<!doctype html>
 
   /* Footer: the language picker does not compete with the search. */
   .rail-foot {
-    flex: none; display: flex; gap: 4px;
+    flex: none; display: flex; flex-direction: column; gap: 5px;
     padding: 9px 12px; border-top: 1px solid var(--line);
   }
+  .rail-foot .row { display: flex; gap: 4px; }
+
+  /* The durations stay folded away until the button is asked for them. */
+  .rail-foot .hours { display: none; }
+  .rail-foot.asking .hours { display: flex; }
   .rail-foot button {
     flex: 1; padding: 4px 0;
     background: none; border: 1px solid var(--line); border-radius: 8px;
@@ -1425,8 +1554,16 @@ PAGE = r"""<!doctype html>
   <nav id="tree"></nav>
 
   <div class="rail-foot">
-    <button id="langPt" type="button">português</button>
-    <button id="langEn" type="button">english</button>
+    <div class="row">
+      <button id="awake" type="button"></button>
+    </div>
+
+    <div class="row hours" id="awakeHours"></div>
+
+    <div class="row">
+      <button id="langPt" type="button">português</button>
+      <button id="langEn" type="button">english</button>
+    </div>
   </div>
 </aside>
 
@@ -1616,6 +1753,8 @@ const STRINGS = {
     noSnippets: 'nenhum snippet ainda',
     saveSnippet: 'guardar', savedSnippet: 'guardado',
     palettePlaceholder: 'copiar um snippet… (enter copia)',
+    keepAwake: 'manter acordado', keepAwakeHint: 'impedir o Mac de dormir',
+    awakeFor: 'acordado · {time}', stopAwake: 'deixar dormir',
   },
   en: {
     filterPlaceholder: 'filter project or session',
@@ -1657,6 +1796,8 @@ const STRINGS = {
     noSnippets: 'no snippets yet',
     saveSnippet: 'keep', savedSnippet: 'kept',
     palettePlaceholder: 'copy a snippet… (enter copies)',
+    keepAwake: 'keep awake', keepAwakeHint: 'hold off sleep on this Mac',
+    awakeFor: 'awake · {time}', stopAwake: 'let it sleep',
   },
 };
 
@@ -1687,6 +1828,12 @@ const ACTIVE_WINDOW = 2 * 3600;
 const scopeLive = document.getElementById('scopeLive');
 const langPt = document.getElementById('langPt');
 const langEn = document.getElementById('langEn');
+const railFoot = document.querySelector('.rail-foot');
+const awake = document.getElementById('awake');
+const awakeHours = document.getElementById('awakeHours');
+
+// The deadline the server handed back, as an epoch in seconds. Zero is asleep.
+let awakeUntil = 0;
 const scopeAll = document.getElementById('scopeAll');
 
 for (const [name, box] of Object.entries(toggles)) {
@@ -2344,6 +2491,7 @@ function paintLang() {
   }
   langPt.classList.toggle('on', lang === 'pt');
   langEn.classList.toggle('on', lang === 'en');
+  paintAwake();
   paintView();
 }
 
@@ -2362,6 +2510,91 @@ function setLang(next) {
   drawTree();
   draw();
 }
+
+// KEEPING THE MAC AWAKE
+
+function countdown(seconds) {
+  const whole = Math.ceil(seconds / 60);
+  const hours = Math.floor(whole / 60);
+  const minutes = whole % 60;
+  if (!hours) return minutes + 'min';
+
+  return hours + ':' + String(minutes).padStart(2, '0');
+}
+
+function paintAwake() {
+  const left = awakeUntil - Date.now() / 1000;
+  const holding = left > 0;
+  awake.classList.toggle('on', holding);
+  if (!holding) {
+    awake.textContent = t('keepAwake');
+    awake.title = t('keepAwakeHint');
+    return;
+  }
+
+  awake.textContent = t('awakeFor', { time: countdown(left) });
+  awake.title = t('stopAwake');
+}
+
+// Counted down here rather than polled: this page set the deadline, so a
+// request every second would buy nothing. The one moment it has to ask again is
+// when the clock runs out, because the server is what knows the child is gone.
+function tickAwake() {
+  if (!awakeUntil) return;
+
+  const done = awakeUntil - Date.now() / 1000 <= 0;
+  if (done) {
+    awakeUntil = 0;
+    loadAwake();
+    return;
+  }
+
+  paintAwake();
+}
+
+function drawAwakeHours(hours) {
+  awakeHours.replaceChildren();
+  for (const count of hours) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = count + 'h';
+    button.addEventListener('click', () => sendAwake(count));
+    awakeHours.appendChild(button);
+  }
+}
+
+function onAwake(state) {
+  awakeUntil = state.until || 0;
+  drawAwakeHours(state.hours || []);
+  paintAwake();
+}
+
+function sendAwake(hours) {
+  railFoot.classList.remove('asking');
+  fetch('/api/caffeine', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ hours: hours }),
+  }).then((response) => response.json()).then(onAwake).catch(() => null);
+}
+
+async function loadAwake() {
+  try {
+    const response = await fetch('/api/caffeine');
+    onAwake(await response.json());
+  } catch (error) { /* server down; the next visit asks again */ }
+}
+
+function toggleAwake() {
+  const holding = awakeUntil > Date.now() / 1000;
+  if (holding) {
+    sendAwake(0);
+    return;
+  }
+
+  railFoot.classList.toggle('asking');
+}
+
 
 function paintScope() {
   scopeLive.classList.toggle('on', scope === 'live');
@@ -2971,6 +3204,15 @@ filter.addEventListener('keydown', (event) => {
   drawTree();
 });
 
+awake.addEventListener('click', toggleAwake);
+
+// A deploy restarts the agent and takes the caffeinate with it, so a tab left
+// open can be showing a countdown that no longer means anything.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  loadAwake();
+});
+
 langPt.addEventListener('click', () => setLang('pt'));
 langEn.addEventListener('click', () => setLang('en'));
 
@@ -3169,6 +3411,8 @@ paintView();
 pollState();
 pollIndex();
 loopSnippets();
+loadAwake();
+setInterval(tickAwake, 1000);
 </script>
 </body>
 </html>
@@ -3342,6 +3586,8 @@ def main() -> None:
     except OSError as error:
         sys.exit(f"pergula: cannot bind {address} — {error}")
 
+    adopt_caffeine()
+
     started = time.time()
     index = build_index(Handler.scope)
     sessions = sum(len(group["sessions"]) for group in index["projects"])
@@ -3356,6 +3602,7 @@ def main() -> None:
     try:
         server.serve_forever()
     except KeyboardInterrupt:
+        stop_caffeine()
         print("\npergula: stopped")
 
 

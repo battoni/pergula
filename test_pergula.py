@@ -17,9 +17,12 @@ that fails loudly needs less help.
 import importlib.machinery
 import importlib.util
 import json
+import os
 import re
 import tempfile
+import time
 import unittest
+import unittest.mock
 import xml.etree.ElementTree as ElementTree
 from pathlib import Path
 from urllib.parse import unquote
@@ -637,6 +640,136 @@ class Favourites(unittest.TestCase):
         pergula.set_favourite("one", True)
 
         self.assertNotEqual(before, pergula.snippets_token(pergula.snippet_files()))
+
+
+class Caffeine(unittest.TestCase):
+    """The Mac is held awake by a child process, and the page is told about it by
+    a deadline. Everything that can go wrong here is a lie told to the page: a
+    countdown for a process that died, a second assertion running unreachable
+    behind the first, or a recorded pid signalled after the number was reused.
+
+    No real `caffeinate` is spawned. A test that kept the machine awake for a
+    quarter of an hour, and left it awake when it failed, would be worse than the
+    bug it looked for."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp())
+        self.file = pergula.CAFFEINE_PATH
+        pergula.CAFFEINE_PATH = self.home / "caffeine.json"
+        self.spawned = []
+
+    def tearDown(self):
+        pergula._CAFFEINE["child"] = None
+        pergula._CAFFEINE["until"] = 0.0
+        pergula.CAFFEINE_PATH = self.file
+
+    def fake_popen(self, alive=True):
+        """A stand-in for the child: `poll()` is how pergula asks whether the
+        assertion is still up."""
+        child = unittest.mock.Mock()
+        child.pid = 4242 + len(self.spawned)
+        child.poll.return_value = None if alive else 0
+        self.spawned.append(child)
+        return child
+
+    def start(self, hours, alive=True):
+        with unittest.mock.patch.object(pergula.subprocess, "Popen",
+                                        side_effect=lambda *a, **k: self.fake_popen(alive)):
+            return pergula.start_caffeine(hours)
+
+    def test_nothing_running_reads_as_asleep(self):
+        self.assertEqual(pergula.caffeine_state()["until"], 0)
+
+    def test_starting_sets_a_deadline_two_hours_out(self):
+        state = self.start(2)
+
+        self.assertAlmostEqual(state["until"] - time.time(), 2 * 3600, delta=5)
+
+    def test_starting_passes_the_flags_that_actually_hold_sleep(self):
+        with unittest.mock.patch.object(pergula.subprocess, "Popen",
+                                        side_effect=lambda *a, **k: self.fake_popen()) as spawn:
+            pergula.start_caffeine(1)
+
+        self.assertEqual(spawn.call_args.args[0], ["caffeinate", "-disu", "-t", "3600"])
+
+    def test_a_second_start_ends_the_first(self):
+        self.start(1)
+        self.start(4)
+
+        self.assertEqual(self.spawned[0].terminate.call_count, 1)
+        self.assertIs(pergula._CAFFEINE["child"], self.spawned[1])
+
+    def test_stopping_ends_the_child_and_clears_the_deadline(self):
+        self.start(1)
+
+        state = pergula.stop_caffeine()
+
+        self.assertEqual(self.spawned[0].terminate.call_count, 1)
+        self.assertEqual(state["until"], 0)
+
+    def test_a_child_that_exited_reads_as_asleep(self):
+        """`caffeinate -t` ends by itself. The clock still says hours to go, so
+        the process is what gets asked."""
+        self.start(4)
+        self.spawned[0].poll.return_value = 0
+
+        self.assertEqual(pergula.caffeine_state()["until"], 0)
+
+    def test_the_hours_are_clamped_to_the_limit(self):
+        state = self.start(pergula.CAFFEINE_LIMIT + 40)
+
+        self.assertAlmostEqual(state["until"] - time.time(),
+                               pergula.CAFFEINE_LIMIT * 3600, delta=5)
+
+    def test_the_deadline_is_written_down_with_the_pid(self):
+        self.start(1)
+
+        saved = json.loads(pergula.CAFFEINE_PATH.read_text())
+        self.assertEqual(saved["pid"], self.spawned[0].pid)
+
+    def test_stopping_clears_the_recorded_pid(self):
+        self.start(1)
+        pergula.stop_caffeine()
+
+        self.assertEqual(json.loads(pergula.CAFFEINE_PATH.read_text()),
+                         {"until": 0, "pid": 0})
+
+    def test_a_restart_clears_a_deadline_it_can_no_longer_honour(self):
+        pergula.save_caffeine(time.time() + 3600, 0)
+
+        pergula.adopt_caffeine()
+
+        self.assertEqual(json.loads(pergula.CAFFEINE_PATH.read_text())["until"], 0)
+
+    def test_a_reused_pid_is_not_signalled(self):
+        """This process answers to its own pid and is not caffeinate."""
+        pergula.save_caffeine(time.time() + 3600, os.getpid())
+
+        with unittest.mock.patch.object(pergula.os, "kill") as kill:
+            pergula.adopt_caffeine()
+
+        self.assertEqual(kill.call_count, 0)
+
+    def test_a_surviving_orphan_is_signalled(self):
+        pergula.save_caffeine(time.time() + 3600, 4242)
+
+        with unittest.mock.patch.object(pergula, "owns_pid", return_value=True):
+            with unittest.mock.patch.object(pergula.os, "kill") as kill:
+                pergula.adopt_caffeine()
+
+        self.assertEqual(kill.call_args.args[0], 4242)
+
+    def test_a_missing_file_is_not_an_error(self):
+        pergula.adopt_caffeine()
+
+        self.assertFalse(pergula.CAFFEINE_PATH.exists())
+
+    def test_a_broken_file_is_not_an_error(self):
+        pergula.CAFFEINE_PATH.write_text("{{{")
+
+        pergula.adopt_caffeine()
+
+        self.assertEqual(pergula.CAFFEINE_PATH.read_text(), "{{{")
 
 
 if __name__ == "__main__":
