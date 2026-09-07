@@ -470,5 +470,174 @@ class Nicknames(unittest.TestCase):
         self.assertEqual(pergula.load_names(), {})
 
 
+class Snippets(unittest.TestCase):
+    """The library is a directory of Markdown files, and every claim that makes
+    it usable — the title line stays out of the clipboard, a retitle moves the
+    file, nothing a page sends escapes the directory — is checked here."""
+
+    def setUp(self):
+        self.original = pergula.SNIPPETS_PATH
+        pergula.SNIPPETS_PATH = Path(tempfile.mkdtemp()) / "snippets"
+
+    def tearDown(self):
+        pergula.SNIPPETS_PATH = self.original
+
+    def test_saving_then_loading_round_trips(self):
+        pergula.save_snippet("commit-msg", "Commit message", "Write the message.")
+        found = pergula.load_snippets()
+
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["slug"], "commit-msg")
+        self.assertEqual(found[0]["title"], "Commit message")
+        self.assertEqual(found[0]["body"], "Write the message.\n")
+
+    def test_the_title_line_stays_out_of_the_clipboard(self):
+        pergula.save_snippet("x", "Title", "the prompt")
+        text = (pergula.SNIPPETS_PATH / "x.md").read_text()
+
+        self.assertTrue(text.startswith("# Title"))
+        self.assertNotIn("# Title", pergula.load_snippets()[0]["body"])
+
+    def test_a_file_written_by_hand_needs_no_heading(self):
+        pergula.SNIPPETS_PATH.mkdir(parents=True)
+        (pergula.SNIPPETS_PATH / "by-hand.md").write_text("just a prompt\n")
+        found = pergula.load_snippets()
+
+        self.assertEqual(found[0]["title"], "by hand")
+        self.assertEqual(found[0]["body"], "just a prompt\n")
+
+    def test_a_folder_becomes_the_group(self):
+        pergula.save_snippet("review/pr", "PR review", "look at the diff")
+        found = pergula.load_snippets()
+
+        self.assertEqual(found[0]["group"], "review")
+        self.assertEqual(found[0]["slug"], "review/pr")
+
+    def test_deleting_takes_the_empty_folder_with_it(self):
+        pergula.save_snippet("review/pr", "PR review", "look at the diff")
+        pergula.drop_snippet("review/pr")
+
+        self.assertEqual(pergula.load_snippets(), [])
+        self.assertFalse((pergula.SNIPPETS_PATH / "review").exists())
+
+    def test_a_shared_folder_survives_one_deletion(self):
+        pergula.save_snippet("review/pr", "PR review", "one")
+        pergula.save_snippet("review/security", "Security", "two")
+        pergula.drop_snippet("review/pr")
+
+        self.assertTrue((pergula.SNIPPETS_PATH / "review").is_dir())
+        self.assertEqual(len(pergula.load_snippets()), 1)
+
+    def test_the_slug_loses_accents_and_punctuation(self):
+        self.assertEqual(pergula.snippet_slug("Revisão de PR!"), "revisao-de-pr")
+        self.assertEqual(pergula.snippet_slug("review/PR review"), "review/pr-review")
+
+    def test_the_slug_cannot_walk_out_of_the_directory(self):
+        self.assertEqual(pergula.snippet_slug("../../etc/passwd"), "etc/passwd")
+        self.assertEqual(pergula.snippet_slug("/etc/passwd"), "etc/passwd")
+        self.assertEqual(pergula.snippet_slug("a/b/c/d"), "a/b")
+        self.assertEqual(pergula.snippet_slug("..."), "")
+
+    def test_the_token_moves_only_when_the_library_does(self):
+        pergula.save_snippet("one", "One", "a")
+        before = pergula.snippets_token(pergula.snippet_files())
+
+        self.assertEqual(before, pergula.snippets_token(pergula.snippet_files()))
+
+        pergula.save_snippet("two", "Two", "b")
+        self.assertNotEqual(before, pergula.snippets_token(pergula.snippet_files()))
+
+    def test_a_missing_directory_reads_as_empty(self):
+        self.assertEqual(pergula.load_snippets(), [])
+        self.assertEqual(pergula.snippet_files(), [])
+
+
+class Favourites(unittest.TestCase):
+    """Five snippets sit in the sidebar. The cap, the ordering and the two ways
+    a star can be orphaned — a retitle and a delete — are the whole of it."""
+
+    def setUp(self):
+        self.home = Path(tempfile.mkdtemp())
+        self.snippets = pergula.SNIPPETS_PATH
+        self.stars = pergula.FAVOURITES_PATH
+        pergula.SNIPPETS_PATH = self.home / "snippets"
+        pergula.FAVOURITES_PATH = self.home / "favourites.json"
+
+    def tearDown(self):
+        pergula.SNIPPETS_PATH = self.snippets
+        pergula.FAVOURITES_PATH = self.stars
+
+    def test_starring_then_reading_round_trips(self):
+        pergula.set_favourite("one", True)
+
+        self.assertEqual(pergula.load_favourites(), ["one"])
+
+    def test_starring_twice_does_not_duplicate(self):
+        pergula.set_favourite("one", True)
+        pergula.set_favourite("one", True)
+
+        self.assertEqual(pergula.load_favourites(), ["one"])
+
+    def test_unstarring_removes_it(self):
+        pergula.set_favourite("one", True)
+        pergula.set_favourite("one", False)
+
+        self.assertEqual(pergula.load_favourites(), [])
+
+    def test_a_new_star_joins_the_end(self):
+        for slug in ("one", "two", "three"):
+            pergula.set_favourite(slug, True)
+
+        self.assertEqual(pergula.load_favourites(), ["one", "two", "three"])
+
+    def test_the_sixth_is_refused_and_the_five_hold(self):
+        for slug in ("a", "b", "c", "d", "e"):
+            pergula.set_favourite(slug, True)
+
+        pergula.set_favourite("f", True)
+
+        self.assertEqual(pergula.load_favourites(), ["a", "b", "c", "d", "e"])
+
+    def test_room_reopens_when_one_is_dropped(self):
+        for slug in ("a", "b", "c", "d", "e"):
+            pergula.set_favourite(slug, True)
+
+        pergula.set_favourite("c", False)
+        pergula.set_favourite("f", True)
+
+        self.assertEqual(pergula.load_favourites(), ["a", "b", "d", "e", "f"])
+
+    def test_a_retitle_carries_the_star_across(self):
+        pergula.set_favourite("old", True)
+        pergula.move_favourite("old", "new")
+
+        self.assertEqual(pergula.load_favourites(), ["new"])
+
+    def test_moving_a_snippet_nobody_starred_changes_nothing(self):
+        pergula.set_favourite("one", True)
+        pergula.move_favourite("other", "renamed")
+
+        self.assertEqual(pergula.load_favourites(), ["one"])
+
+    def test_a_hand_written_file_is_capped_on_read(self):
+        pergula.FAVOURITES_PATH.write_text(json.dumps(list("abcdefgh")))
+
+        self.assertEqual(len(pergula.load_favourites()), pergula.FAVOURITE_LIMIT)
+
+    def test_a_missing_or_broken_file_reads_as_empty(self):
+        self.assertEqual(pergula.load_favourites(), [])
+
+        pergula.FAVOURITES_PATH.write_text("{}")
+        self.assertEqual(pergula.load_favourites(), [])
+
+    def test_the_token_moves_when_only_a_star_moves(self):
+        pergula.save_snippet("one", "One", "a")
+        before = pergula.snippets_token(pergula.snippet_files())
+
+        pergula.set_favourite("one", True)
+
+        self.assertNotEqual(before, pergula.snippets_token(pergula.snippet_files()))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

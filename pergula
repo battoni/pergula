@@ -34,6 +34,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -56,6 +57,17 @@ DEFAULT_LIMIT = 400
 # Project nicknames live next to the transcripts they rename, so they survive
 # reinstalls of this script and are trivial to inspect or delete by hand.
 NAMES_PATH = Path.home() / ".claude" / "pergula-names.json"
+
+# Up to five snippets sit in the sidebar while you read, so the handful you send
+# constantly is one click away without leaving the transcript. The list is a
+# plain array of slugs, ordered as they were starred.
+FAVOURITES_PATH = Path.home() / ".claude" / "pergula-favourites.json"
+FAVOURITE_LIMIT = 5
+
+# Snippets: the prompts you retype every day. One Markdown file each rather than
+# rows inside a blob, so they stay readable, greppable, editable in any editor
+# and versionable. A single directory level groups them.
+SNIPPETS_PATH = Path.home() / ".claude" / "pergula-snippets"
 
 # The CLI keeps one file per running session here, named by pid, holding the
 # session id, the cwd and a busy/idle status. It is the only honest answer to
@@ -382,6 +394,142 @@ def names_stamp() -> str:
         return "0"
 
 
+def load_favourites() -> list[str]:
+    try:
+        data = json.loads(FAVOURITES_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+
+    if not isinstance(data, list):
+        return []
+
+    return [str(slug) for slug in data][:FAVOURITE_LIMIT]
+
+
+def save_favourites(slugs: list[str]) -> None:
+    kept = json.dumps(slugs[:FAVOURITE_LIMIT], ensure_ascii=False, indent=2)
+    FAVOURITES_PATH.write_text(kept, encoding="utf-8")
+
+
+def set_favourite(slug: str, wanted: bool) -> list[str]:
+    with _CACHE_LOCK:
+        slugs = [one for one in load_favourites() if one != slug]
+
+        # A new favourite joins the end, so the ones already there do not move.
+        room = len(slugs) < FAVOURITE_LIMIT
+        adding = wanted and room
+        if adding:
+            slugs.append(slug)
+
+        save_favourites(slugs)
+
+    return slugs
+
+
+def move_favourite(was: str, slug: str) -> None:
+    """Retitling a snippet moves its file; the star has to move with it."""
+    with _CACHE_LOCK:
+        slugs = load_favourites()
+        if was not in slugs:
+            return
+
+        save_favourites([slug if one == was else one for one in slugs])
+
+
+def favourites_stamp() -> str:
+    try:
+        return str(FAVOURITES_PATH.stat().st_mtime_ns)
+    except OSError:
+        return "0"
+
+
+def snippet_slug(raw: str) -> str:
+    """A snippet is addressed by its path: an optional folder, then a name. Both
+    are reduced to the safe alphabet here, so nothing arriving from the page can
+    walk out of the directory."""
+    plain = unicodedata.normalize("NFD", str(raw)).encode("ascii", "ignore").decode("ascii")
+    cleaned = [re.sub(r"[^a-z0-9]+", "-", part.lower()).strip("-") for part in plain.split("/")]
+    parts = [part for part in cleaned if part][:2]
+
+    return "/".join(parts)
+
+
+def split_snippet(text: str) -> tuple[str, str]:
+    """The first line names the snippet when it is a heading, and stays out of
+    the clipboard. Everything under it is the prompt, verbatim."""
+    head, _, rest = text.partition("\n")
+    heading = re.match(r"^#\s+(.+?)\s*$", head)
+    if not heading:
+        return "", text
+
+    return heading.group(1), rest.lstrip("\n")
+
+
+def snippet_files() -> list[Path]:
+    if not SNIPPETS_PATH.is_dir():
+        return []
+
+    loose = sorted(SNIPPETS_PATH.glob("*.md"))
+    grouped = sorted(SNIPPETS_PATH.glob("*/*.md"))
+
+    return loose + grouped
+
+
+def snippets_token(files: list[Path]) -> str:
+    """Built from stat() alone, so an unchanged library is answered without
+    opening a single file."""
+    try:
+        stamps = [path.stat().st_mtime_ns for path in files]
+    except OSError:
+        return "0"
+
+    return f"{len(stamps)}:{max(stamps, default=0)}:{favourites_stamp()}"
+
+
+def load_snippets() -> list[dict]:
+    found = []
+    for path in snippet_files():
+        try:
+            text = path.read_text(encoding="utf-8")
+            stamp = path.stat().st_mtime
+        except OSError:
+            continue
+
+        slug = path.relative_to(SNIPPETS_PATH).with_suffix("").as_posix()
+        group, _, name = slug.rpartition("/")
+        title, body = split_snippet(text)
+        found.append({
+            "slug": slug,
+            "group": group,
+            "title": title or name.replace("-", " "),
+            "body": body,
+            "mtime": stamp,
+        })
+
+    found.sort(key=lambda item: (item["group"], item["title"].lower()))
+
+    return found
+
+
+def save_snippet(slug: str, title: str, body: str) -> None:
+    path = SNIPPETS_PATH / f"{slug}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    heading = f"# {title}\n\n" if title else ""
+    path.write_text(heading + body.strip() + "\n", encoding="utf-8")
+
+
+def drop_snippet(slug: str) -> None:
+    path = SNIPPETS_PATH / f"{slug}.md"
+    try:
+        path.unlink()
+        # An empty group is an empty folder; left behind, it lists forever.
+        spare = path.parent != SNIPPETS_PATH and not any(path.parent.iterdir())
+        if spare:
+            path.parent.rmdir()
+    except OSError:
+        return
+
+
 def all_transcripts(scope: Path | None) -> list[Path]:
     if scope is not None:
         directory = PROJECTS / project_slug(scope)
@@ -664,24 +812,104 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(build_state(self.scope, session, limit), since)
             return
 
+        if parsed.path == "/api/snippets":
+            files = snippet_files()
+            token = snippets_token(files)
+            unchanged = since and since == token
+            if unchanged:
+                self.send_payload(204, b"", "application/json")
+                return
+
+            payload = {
+                "token": token,
+                "home": str(SNIPPETS_PATH),
+                "snippets": load_snippets(),
+                "favourites": load_favourites(),
+            }
+            self.send_json(payload, since)
+            return
+
         self.send_payload(404, b"not found", "text/plain; charset=utf-8")
 
+    def send_ok(self, payload: dict):
+        self.send_payload(200, json.dumps(payload).encode("utf-8"), "application/json")
+
+    def send_bad(self):
+        self.send_payload(400, b"bad request", "text/plain; charset=utf-8")
+
+    def read_body(self) -> dict | None:
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (ValueError, json.JSONDecodeError):
+            return None
+
+        return body if isinstance(body, dict) else None
+
     def do_POST(self):
-        if urlparse(self.path).path != "/api/rename":
+        routes = {
+            "/api/rename": self.rename_project,
+            "/api/snippet": self.write_snippet,
+            "/api/snippet/delete": self.erase_snippet,
+            "/api/favourite": self.star_snippet,
+        }
+        route = routes.get(urlparse(self.path).path)
+        if not route:
             self.send_payload(404, b"not found", "text/plain; charset=utf-8")
             return
 
-        try:
-            length = int(self.headers.get("Content-Length") or 0)
-            payload = json.loads(self.rfile.read(length).decode("utf-8"))
-            slug = str(payload["slug"])
-            label = str(payload.get("label") or "").strip()[:80]
-        except (ValueError, KeyError, TypeError, json.JSONDecodeError):
-            self.send_payload(400, b"bad request", "text/plain; charset=utf-8")
+        payload = self.read_body()
+        if payload is None:
+            self.send_bad()
             return
 
-        save_name(slug, label)
-        self.send_payload(200, b'{"ok":true}', "application/json")
+        route(payload)
+
+    def rename_project(self, payload: dict):
+        slug = str(payload.get("slug") or "")
+        if not slug:
+            self.send_bad()
+            return
+
+        save_name(slug, str(payload.get("label") or "").strip()[:80])
+        self.send_ok({"ok": True})
+
+    def write_snippet(self, payload: dict):
+        title = str(payload.get("title") or "").strip()[:80]
+        group = str(payload.get("group") or "").strip()
+        slug = snippet_slug(f"{group}/{title}")
+        if not slug:
+            self.send_bad()
+            return
+
+        save_snippet(slug, title, str(payload.get("body") or ""))
+
+        # Retitling or regrouping moves the file, so the old one has to go.
+        was = snippet_slug(str(payload.get("was") or ""))
+        moved = was and was != slug
+        if moved:
+            drop_snippet(was)
+            move_favourite(was, slug)
+
+        self.send_ok({"ok": True, "slug": slug})
+
+    def erase_snippet(self, payload: dict):
+        slug = snippet_slug(str(payload.get("slug") or ""))
+        if not slug:
+            self.send_bad()
+            return
+
+        drop_snippet(slug)
+        set_favourite(slug, False)
+        self.send_ok({"ok": True})
+
+    def star_snippet(self, payload: dict):
+        slug = snippet_slug(str(payload.get("slug") or ""))
+        if not slug:
+            self.send_bad()
+            return
+
+        self.send_ok({"ok": True, "favourites": set_favourite(slug, bool(payload.get("on")))})
 
 
 PAGE = r"""<!doctype html>
@@ -709,6 +937,8 @@ PAGE = r"""<!doctype html>
     --accent: #c0e021;
     --accent-soft: #2a3210;
     --code: #12100e;
+    /* The only destructive colour: the delete button, armed. */
+    --danger: #e06c62;
     --rail-width: 288px;
 
     /* One hue per speaker: warm for people and Claude, cool for the machine. */
@@ -823,6 +1053,126 @@ PAGE = r"""<!doctype html>
   #rail .follow:hover { color: var(--body); }
   #rail .follow:hover input[type="checkbox"] { border-color: var(--accent); }
   #tree { flex: 1; overflow-y: auto; padding: 8px 8px 24px; }
+
+  /* ---- library ---- */
+  /* The rail serves two lists. The tabs pick which; everything below them that
+     belongs to only one view is marked and hidden by the body class. */
+  .tabs { display: flex; gap: 4px; margin-bottom: 10px; }
+  .tabs button {
+    flex: 1; padding: 5px 0;
+    background: none; border: 1px solid var(--line); border-radius: 8px;
+    color: var(--muted); font: inherit; font-size: 11.5px; cursor: pointer;
+  }
+  .tabs button:hover { color: var(--heading); }
+  .tabs button.on { background: var(--accent-soft); border-color: var(--accent); color: var(--heading); }
+  #rail .library-only { display: none; }
+  body.library #rail .sessions-only { display: none; }
+  body.library #rail .library-only { display: flex; }
+  body.library #scroller { display: none; }
+  body.library #top .swatch, body.library #copySid { display: none; }
+  /* A snippet with no group has no summary above it to indent under. */
+  .session.flat { padding-left: 9px; }
+  .session .rowcopy { flex: none; opacity: 0; transition: opacity .12s; }
+  .session:hover .rowcopy, .session .rowcopy.done { opacity: 1; }
+
+  /* Five prompts within reach while you read. The block vanishes entirely when
+     nothing is starred, rather than sitting there as an empty heading. */
+  #favourites { flex: none; padding: 9px 8px; border-bottom: 1px solid var(--line); }
+  #favourites:empty { display: none; }
+  body.library #rail #favourites { display: none; }
+  .fav-head {
+    padding: 0 6px 6px;
+    font-size: 10px; letter-spacing: .09em; text-transform: uppercase;
+    color: var(--subtle); font-weight: 600;
+  }
+  .fav {
+    display: flex; align-items: center; gap: 8px;
+    width: 100%; text-align: left;
+    padding: 5px 9px; margin: 1px 0;
+    background: none; border: 0; border-radius: 8px;
+    color: var(--muted); font: inherit; font-size: 12.5px;
+    cursor: pointer; overflow: hidden;
+  }
+  .fav:hover { background: var(--panel); color: var(--body); }
+  .fav.done { color: var(--accent); }
+  .fav .pin { flex: none; color: var(--accent); font-size: 10px; }
+  .fav .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .session .pin { flex: none; color: var(--accent); font-size: 10px; }
+  button.copy.star { padding: 5px 10px; font-size: 13px; line-height: 1; }
+  button.copy.star.on { color: var(--accent); border-color: var(--accent); }
+  button.copy.star:disabled { opacity: .4; cursor: default; }
+  button.copy.star:disabled:hover { color: var(--muted); border-color: var(--line); }
+
+  #library { display: none; flex: 1; min-height: 0; }
+  body.library #library { display: flex; }
+  #library > .empty { flex: 1; padding-top: 22vh; }
+  #library .editor {
+    display: none; flex-direction: column; gap: 11px;
+    width: 100%; max-width: 860px; min-height: 0;
+    margin: 0 auto; padding: 22px 22px 26px;
+  }
+  #library.editing .editor { display: flex; }
+  #library.editing .empty { display: none; }
+  #library .fields { display: flex; gap: 9px; flex: none; }
+  #library input, #library textarea {
+    background: var(--code); color: var(--body);
+    border: 1px solid var(--line); border-radius: 9px;
+    font: inherit; padding: 9px 12px;
+  }
+  #library input:focus, #library textarea:focus { outline: none; border-color: var(--accent); }
+  #snipTitle { flex: 1; min-width: 0; color: var(--heading); font-size: 15px; font-weight: 600; }
+  #snipGroup { width: 190px; flex: none; font-size: 13px; }
+  #snipBody {
+    flex: 1; min-height: 140px; resize: none;
+    font: 13.5px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  #library .actions { display: flex; align-items: center; gap: 8px; flex: none; }
+  #library .where {
+    margin-left: auto; color: var(--subtle);
+    font: 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  button.copy.primary {
+    background: var(--accent); border-color: var(--accent);
+    color: #141413; font-weight: 600; padding: 5px 16px;
+  }
+  button.copy.primary:hover, button.copy.primary.done { color: #141413; }
+  button.copy.danger:hover, button.copy.armed { color: var(--danger); border-color: var(--danger); }
+
+  /* ---- palette ---- */
+  /* The fast path: cmd+K, type, Enter. No pointer involved and no view change. */
+  .palette {
+    position: fixed; inset: 0; z-index: 20; display: none;
+    justify-content: center; align-items: flex-start;
+    padding-top: 13vh; background: rgba(10, 9, 8, .58);
+  }
+  .palette.on { display: flex; }
+  .palette .sheet {
+    width: min(660px, 92vw); overflow: hidden;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+    box-shadow: 0 22px 60px rgba(0, 0, 0, .5);
+  }
+  .palette input {
+    width: 100%; padding: 14px 17px;
+    background: none; border: 0; border-bottom: 1px solid var(--line);
+    color: var(--heading); font: inherit; font-size: 15px;
+  }
+  .palette input:focus { outline: none; }
+  .palette .results { max-height: 46vh; overflow-y: auto; padding: 6px; }
+  .palette .hit {
+    display: flex; align-items: baseline; gap: 9px;
+    width: 100%; text-align: left;
+    padding: 8px 11px; border: 0; border-radius: 9px;
+    background: none; color: var(--body); font: inherit; font-size: 13px;
+    cursor: pointer; overflow: hidden;
+  }
+  .palette .hit .group { flex: none; color: var(--subtle); font-size: 11px; }
+  .palette .hit .peek {
+    flex: 1; min-width: 0; color: var(--subtle); font-size: 11.5px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .palette .hit.on { background: var(--accent-soft); color: var(--heading); }
+  .palette .hit.done { background: var(--accent-soft); color: var(--accent); }
 
   /* Footer: the language picker does not compete with the search. */
   .rail-foot {
@@ -1045,20 +1395,32 @@ PAGE = r"""<!doctype html>
     </g>
     </svg>
 
+    <div class="tabs">
+      <button id="tabSessions" type="button" class="on" data-i18n="tabSessions"></button>
+
+      <button id="tabLibrary" type="button" data-i18n="tabLibrary"></button>
+    </div>
+
     <input id="filter" type="search" data-i18n-ph="filterPlaceholder" autocomplete="off">
 
-    <div class="scope">
+    <div class="scope sessions-only">
       <button id="scopeLive" type="button" data-i18n-title="activeTitle" data-i18n="active"></button>
 
       <button id="scopeAll" type="button" data-i18n="all"></button>
     </div>
 
-    <label class="follow"><input type="checkbox" id="follow" checked> <span data-i18n="followLive"></span></label>
+    <div class="scope library-only">
+      <button id="snipNew" type="button" data-i18n="newSnippet"></button>
+    </div>
 
-    <label class="follow"><input type="checkbox" id="showTools" checked> <span data-i18n="showCommands"></span></label>
+    <label class="follow sessions-only"><input type="checkbox" id="follow" checked> <span data-i18n="followLive"></span></label>
 
-    <label class="follow"><input type="checkbox" id="showResults"> <span data-i18n="showOutputs"></span></label>
+    <label class="follow sessions-only"><input type="checkbox" id="showTools" checked> <span data-i18n="showCommands"></span></label>
+
+    <label class="follow sessions-only"><input type="checkbox" id="showResults"> <span data-i18n="showOutputs"></span></label>
   </div>
+
+  <div id="favourites" class="sessions-only"></div>
 
   <nav id="tree"></nav>
 
@@ -1102,6 +1464,42 @@ PAGE = r"""<!doctype html>
   <main id="scroller">
     <div id="feed"><div class="empty" data-i18n="waiting"></div></div>
   </main>
+
+  <section id="library">
+    <div class="empty" data-i18n="pickSnippet"></div>
+
+    <div class="editor">
+      <div class="fields">
+        <input id="snipTitle" type="text" data-i18n-ph="snippetTitle" autocomplete="off">
+
+        <input id="snipGroup" type="text" list="snipGroups" data-i18n-ph="snippetGroup" autocomplete="off">
+
+        <datalist id="snipGroups"></datalist>
+      </div>
+
+      <textarea id="snipBody" data-i18n-ph="snippetBody" spellcheck="false"></textarea>
+
+      <div class="actions">
+        <button class="copy primary" id="snipCopy" type="button" data-i18n="copy"></button>
+
+        <button class="copy star" id="snipStar" type="button">&#9734;</button>
+
+        <button class="copy" id="snipSave" type="button" data-i18n="save"></button>
+
+        <button class="copy danger" id="snipDelete" type="button" data-i18n="remove"></button>
+
+        <span class="where" id="snipWhere"></span>
+      </div>
+    </div>
+  </section>
+</div>
+
+<div class="palette" id="palette">
+  <div class="sheet">
+    <input id="paletteInput" type="search" data-i18n-ph="palettePlaceholder" autocomplete="off">
+
+    <div class="results" id="paletteList"></div>
+  </div>
 </div>
 
 <button class="jump" id="jump" data-i18n="newMessages"></button>
@@ -1144,6 +1542,37 @@ let limit = 400;
 let session = null;
 let pinnedToBottom = true;
 let collapsed = new Set(JSON.parse(localStorage.getItem('pergula:collapsed') || '[]'));
+
+const tabSessions = document.getElementById('tabSessions');
+const tabLibrary = document.getElementById('tabLibrary');
+const library = document.getElementById('library');
+const snipNew = document.getElementById('snipNew');
+const snipTitle = document.getElementById('snipTitle');
+const snipGroup = document.getElementById('snipGroup');
+const snipGroups = document.getElementById('snipGroups');
+const snipBody = document.getElementById('snipBody');
+const snipCopy = document.getElementById('snipCopy');
+const snipSave = document.getElementById('snipSave');
+const snipDelete = document.getElementById('snipDelete');
+const snipWhere = document.getElementById('snipWhere');
+const snipStar = document.getElementById('snipStar');
+const favourites = document.getElementById('favourites');
+const palette = document.getElementById('palette');
+const paletteInput = document.getElementById('paletteInput');
+const paletteList = document.getElementById('paletteList');
+
+let view = 'sessions';
+let snippets = [];
+let snippetsToken = '';
+let snippetsHome = '';
+let favouriteSlugs = [];
+let editing = null;
+let dirty = false;
+let draftTimer = null;
+let armed = false;
+let paletteAt = 0;
+
+const FAVOURITE_LIMIT = 5;
 // LANGUAGE
 
 const STRINGS = {
@@ -1172,6 +1601,21 @@ const STRINGS = {
     noStatus: 'sem status', autoName: '(nome automático)',
     renameHint: 'renomear projeto (vazio volta ao caminho)',
     now: 'agora', month: 'mes',
+    nothingFound: 'nada encontrado',
+    filterSnippets: 'filtrar snippet',
+    favourites: 'favoritos',
+    favouriteAdd: 'fixar nos favoritos',
+    favouriteDrop: 'tirar dos favoritos',
+    favouriteFull: 'no máximo 5 favoritos',
+    tabSessions: 'sessões', tabLibrary: 'biblioteca',
+    newSnippet: '+ novo snippet',
+    snippetTitle: 'título', snippetGroup: 'grupo (opcional)',
+    snippetBody: 'o prompt, exatamente como você quer no clipboard',
+    save: 'salvar', saved: 'salvo', remove: 'apagar', confirmRemove: 'confirmar?',
+    pickSnippet: 'escolha um snippet à esquerda, ou crie um novo',
+    noSnippets: 'nenhum snippet ainda',
+    saveSnippet: 'guardar', savedSnippet: 'guardado',
+    palettePlaceholder: 'copiar um snippet… (enter copia)',
   },
   en: {
     filterPlaceholder: 'filter project or session',
@@ -1198,6 +1642,21 @@ const STRINGS = {
     noStatus: 'no status', autoName: '(automatic name)',
     renameHint: 'rename project (empty restores the path)',
     now: 'now', month: 'mo',
+    nothingFound: 'nothing found',
+    filterSnippets: 'filter snippets',
+    favourites: 'favourites',
+    favouriteAdd: 'pin to favourites',
+    favouriteDrop: 'remove from favourites',
+    favouriteFull: 'five favourites at most',
+    tabSessions: 'sessions', tabLibrary: 'library',
+    newSnippet: '+ new snippet',
+    snippetTitle: 'title', snippetGroup: 'group (optional)',
+    snippetBody: 'the prompt, exactly as you want it on the clipboard',
+    save: 'save', saved: 'saved', remove: 'delete', confirmRemove: 'sure?',
+    pickSnippet: 'pick a snippet on the left, or create one',
+    noSnippets: 'no snippets yet',
+    saveSnippet: 'keep', savedSnippet: 'kept',
+    palettePlaceholder: 'copy a snippet… (enter copies)',
   },
 };
 
@@ -1369,6 +1828,12 @@ function renderProse(text) {
   return out.join('');
 }
 
+function flash(button, hit, back) {
+  button.textContent = hit;
+  button.classList.add('done');
+  setTimeout(() => { button.textContent = back; button.classList.remove('done'); }, 1400);
+}
+
 function copyButton(payload, label) {
   const button = document.createElement('button');
   button.className = 'copy';
@@ -1376,11 +1841,7 @@ function copyButton(payload, label) {
   button.textContent = label;
   button.addEventListener('click', (event) => {
     event.stopPropagation();
-    navigator.clipboard.writeText(payload).then(() => {
-      button.textContent = t('copied');
-      button.classList.add('done');
-      setTimeout(() => { button.textContent = label; button.classList.remove('done'); }, 1400);
-    });
+    navigator.clipboard.writeText(payload).then(() => flash(button, t('copied'), label));
   });
   return button;
 }
@@ -1519,6 +1980,21 @@ function buildMessage(message) {
     when.textContent = stamp.short;
     when.title = stamp.full;
     who.appendChild(when);
+  }
+
+  // The prompts worth keeping are already in the transcript; this promotes one
+  // into the library instead of making you retype it.
+  const promotable = message.role === 'user' && message.kind === 'text' && message.text;
+  if (promotable) {
+    const keep = document.createElement('button');
+    keep.className = 'copy copy-msg';
+    keep.type = 'button';
+    keep.textContent = t('saveSnippet');
+    keep.addEventListener('click', () => {
+      flash(keep, t('savedSnippet'), t('saveSnippet'));
+      promote(message.text);
+    });
+    who.appendChild(keep);
   }
 
   if (message.text) {
@@ -1773,6 +2249,11 @@ function drawTree() {
   // middle of. The tree goes a few seconds stale; whoever finishes redraws.
   if (tree.querySelector('[data-editing], .dragging')) return;
 
+  if (view === 'library') {
+    drawLibraryTree();
+    return;
+  }
+
   const needle = filter.value.trim().toLowerCase();
   tree.replaceChildren();
   visibleRows = [];
@@ -1842,7 +2323,7 @@ function drawTree() {
     empty.className = 'empty';
     empty.textContent = scope === 'live' && !filter.value.trim()
       ? t(hasRegistry ? 'noLiveSession' : 'noRecentSession')
-      : 'nada encontrado';
+      : t('nothingFound');
     tree.appendChild(empty);
   }
 }
@@ -1863,6 +2344,7 @@ function paintLang() {
   }
   langPt.classList.toggle('on', lang === 'pt');
   langEn.classList.toggle('on', lang === 'en');
+  paintView();
 }
 
 function setLang(next) {
@@ -1875,6 +2357,8 @@ function setLang(next) {
   // rebuild rather than swap a few loose labels.
   rendered = [];
   drawTop();
+  drawFavourites();
+  paintStar();
   drawTree();
   draw();
 }
@@ -1891,6 +2375,12 @@ function setScope(next) {
 }
 
 function drawTop() {
+  if (view === 'library') {
+    titleEl.textContent = t('tabLibrary');
+    metaEl.textContent = shortPath(snippetsHome);
+    return;
+  }
+
   if (!session) {
     titleEl.textContent = t('noSession');
     sidEl.dataset.for = '';
@@ -1909,7 +2399,557 @@ function drawTop() {
   metaEl.textContent = shortPath(session.cwd || '') + (session.branch ? '  ·  ' + session.branch : '');
 }
 
+// LIBRARY
+
+// The same reduction the server performs, so the file path shown under the
+// editor is the one that will actually be written.
+function slugify(raw) {
+  const parts = raw.normalize('NFD').replace(/[\u0300-\u036f]/g, '').split('/')
+    .map((part) => part.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''))
+    .filter(Boolean)
+    .slice(0, 2);
+
+  return parts.join('/');
+}
+
+function snippetMatches(item, needle) {
+  if (!needle) return true;
+
+  const hay = item.slug + ' ' + item.title + ' ' + item.body;
+  return hay.toLowerCase().includes(needle);
+}
+
+function findSnippet(slug) {
+  return snippets.find((item) => item.slug === slug) || null;
+}
+
+// A star can outlive the file it points at — deleted in the editor, or by hand.
+// Resolving through the library rather than trusting the list keeps that quiet.
+function favouriteSnippets() {
+  return favouriteSlugs
+    .map((slug) => findSnippet(slug))
+    .filter(Boolean)
+    .slice(0, FAVOURITE_LIMIT);
+}
+
+function copyFavourite(row, item) {
+  navigator.clipboard.writeText(item.body).then(() => {
+    if (!row) return;
+
+    const name = row.querySelector('.name');
+    row.classList.add('done');
+    name.textContent = t('copied');
+    setTimeout(() => {
+      row.classList.remove('done');
+      name.textContent = item.title;
+    }, 1200);
+  });
+}
+
+// One click, no view change: the reason the block exists is that you are in the
+// middle of a transcript and want the prompt, not the library.
+function drawFavourites() {
+  favourites.replaceChildren();
+
+  const starred = favouriteSnippets();
+  if (!starred.length) return;
+
+  const head = document.createElement('div');
+  head.className = 'fav-head';
+  head.textContent = t('favourites');
+  favourites.appendChild(head);
+
+  for (const item of starred) {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'fav';
+    row.title = item.slug + '.md';
+
+    const pin = document.createElement('span');
+    pin.className = 'pin';
+    pin.textContent = '\u2605';
+    row.appendChild(pin);
+
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = item.title;
+    row.appendChild(name);
+
+    row.addEventListener('click', () => copyFavourite(row, item));
+    favourites.appendChild(row);
+  }
+}
+
+function paintStar() {
+  const slug = editing ? editing.slug : '';
+  const on = Boolean(slug) && favouriteSlugs.includes(slug);
+  const blocked = !on && favouriteSlugs.length >= FAVOURITE_LIMIT;
+
+  let hint = t('favouriteAdd');
+  if (on) hint = t('favouriteDrop');
+  if (blocked) hint = t('favouriteFull');
+
+  snipStar.textContent = on ? '\u2605' : '\u2606';
+  snipStar.classList.toggle('on', on);
+  snipStar.disabled = !slug || blocked;
+  snipStar.title = hint;
+  snipStar.setAttribute('aria-label', hint);
+}
+
+function toggleStar() {
+  const starrable = editing !== null && editing.slug;
+  if (!starrable) return;
+
+  const wanted = !favouriteSlugs.includes(editing.slug);
+  fetch('/api/favourite', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ slug: editing.slug, on: wanted }),
+  }).then((response) => response.json()).then((saved) => {
+    favouriteSlugs = saved.favourites;
+    snippetsToken = '';
+    paintStar();
+    drawFavourites();
+    drawTree();
+  }).catch(() => null);
+}
+
+function paintGroups() {
+  const names = [...new Set(snippets.map((item) => item.group).filter(Boolean))].sort();
+  snipGroups.replaceChildren();
+
+  for (const name of names) {
+    const option = document.createElement('option');
+    option.value = name;
+    snipGroups.appendChild(option);
+  }
+}
+
+// Spelling out the file is the point: these are ordinary Markdown documents,
+// and knowing where one sits is what lets you edit it without this page.
+function snippetWhere() {
+  const title = snipTitle.value.trim();
+  if (!title) return '';
+
+  const slug = slugify(snipGroup.value.trim() + '/' + title);
+  return shortPath(snippetsHome) + '/' + slug + '.md';
+}
+
+function paintEditor() {
+  library.classList.toggle('editing', editing !== null);
+  disarm();
+  if (!editing) return;
+
+  snipTitle.value = editing.title;
+  snipGroup.value = editing.group;
+  snipBody.value = editing.body;
+  snipWhere.textContent = snippetWhere();
+  paintStar();
+  paintGroups();
+}
+
+// Switching away from a half-typed snippet must not throw it out. Anything with
+// a title is written; anything without one has no file name to be written under.
+function commitDraft() {
+  clearTimeout(draftTimer);
+  if (!dirty) return null;
+  if (!editing) return null;
+
+  const title = snipTitle.value.trim();
+  dirty = false;
+  if (!title) return null;
+
+  const draft = editing;
+  const payload = {
+    was: draft.slug,
+    title: title,
+    group: snipGroup.value.trim(),
+    body: snipBody.value,
+  };
+
+  return fetch('/api/snippet', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  }).then((response) => response.json()).then((saved) => {
+    draft.slug = saved.slug;
+    draft.title = title;
+    snippetsToken = '';
+    return pollSnippets();
+  }).catch(() => null);
+}
+
+// Every pause in the typing writes the file, so closing the window never costs
+// anything. A retitle writes the new name and the server drops the old one.
+function touchDraft() {
+  dirty = true;
+  snipWhere.textContent = snippetWhere();
+  clearTimeout(draftTimer);
+  draftTimer = setTimeout(commitDraft, 1200);
+}
+
+function openSnippet(slug) {
+  const item = findSnippet(slug);
+  if (!item) return;
+
+  commitDraft();
+  editing = { slug: item.slug, title: item.title, group: item.group, body: item.body };
+  dirty = false;
+  paintEditor();
+  drawTree();
+}
+
+function newSnippet(body) {
+  commitDraft();
+  editing = { slug: '', title: '', group: '', body: body || '' };
+  dirty = Boolean(body);
+  paintEditor();
+  drawTree();
+  snipTitle.focus();
+}
+
+function saveNow() {
+  const title = snipTitle.value.trim();
+  if (!title) {
+    snipTitle.focus();
+    return;
+  }
+
+  dirty = true;
+  commitDraft();
+  flash(snipSave, t('saved'), t('save'));
+}
+
+function disarm() {
+  armed = false;
+  snipDelete.textContent = t('remove');
+  snipDelete.classList.remove('armed');
+}
+
+// Two clicks rather than a modal: a browser dialog would be the only blocking
+// thing on an otherwise quiet page.
+function deleteNow() {
+  if (!editing) return;
+
+  const unsaved = !editing.slug;
+  if (unsaved) {
+    dirty = false;
+    editing = null;
+    paintEditor();
+    drawTree();
+    return;
+  }
+
+  if (!armed) {
+    armed = true;
+    snipDelete.textContent = t('confirmRemove');
+    snipDelete.classList.add('armed');
+    setTimeout(disarm, 3000);
+    return;
+  }
+
+  const slug = editing.slug;
+  dirty = false;
+  editing = null;
+  paintEditor();
+  drawTree();
+
+  fetch('/api/snippet/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ slug: slug }),
+  }).then(() => {
+    snippetsToken = '';
+    return pollSnippets();
+  }).catch(() => null);
+}
+
+function buildSnippetRow(item, ordinal, flat) {
+  const row = document.createElement('div');
+  const isOpen = editing !== null && editing.slug === item.slug;
+  const classes = ['session'];
+  if (flat) classes.push('flat');
+  if (isOpen) classes.push('active');
+
+  row.className = classes.join(' ');
+  row.setAttribute('role', 'button');
+  row.tabIndex = 0;
+  row.title = item.slug + '.md';
+
+  if (ordinal <= 9) {
+    const badge = document.createElement('span');
+    badge.className = 'badge';
+    badge.textContent = ordinal;
+    row.appendChild(badge);
+  }
+
+  const name = document.createElement('span');
+  name.className = 'name';
+  name.textContent = item.title;
+  row.appendChild(name);
+
+  if (favouriteSlugs.includes(item.slug)) {
+    const pin = document.createElement('span');
+    pin.className = 'pin';
+    pin.textContent = '\u2605';
+    row.appendChild(pin);
+  }
+
+  const copy = copyButton(item.body, t('copy'));
+  copy.classList.add('rowcopy');
+  row.appendChild(copy);
+
+  row.addEventListener('click', () => openSnippet(item.slug));
+  row.addEventListener('keydown', (event) => {
+    const activates = event.key === 'Enter' || event.key === ' ';
+    if (!activates) return;
+
+    event.preventDefault();
+    openSnippet(item.slug);
+  });
+
+  return row;
+}
+
+// Folders are the only grouping there is, so the tree mirrors the directory:
+// loose snippets at the top, one collapsible group per folder underneath.
+function drawLibraryTree() {
+  const needle = filter.value.trim().toLowerCase();
+  tree.replaceChildren();
+  visibleRows = [];
+
+  const hits = snippets.filter((item) => snippetMatches(item, needle));
+
+  for (const item of hits.filter((one) => !one.group)) {
+    visibleRows.push(item.slug);
+    tree.appendChild(buildSnippetRow(item, visibleRows.length, true));
+  }
+
+  const names = [...new Set(hits.map((item) => item.group).filter(Boolean))];
+  for (const folder of names) {
+    const key = 'snip:' + folder;
+    const group = document.createElement('details');
+    group.className = 'project';
+    group.open = needle ? true : !collapsed.has(key);
+
+    const summary = document.createElement('summary');
+    const heading = document.createElement('b');
+    heading.textContent = folder;
+    summary.appendChild(heading);
+
+    const members = hits.filter((item) => item.group === folder);
+    const count = document.createElement('span');
+    count.className = 'count';
+    count.textContent = members.length;
+    summary.appendChild(count);
+
+    group.appendChild(summary);
+    group.addEventListener('toggle', () => {
+      if (filter.value.trim()) return;
+      if (group.open) collapsed.delete(key);
+      if (!group.open) collapsed.add(key);
+      localStorage.setItem('pergula:collapsed', JSON.stringify([...collapsed]));
+    });
+
+    for (const item of members) {
+      visibleRows.push(item.slug);
+      group.appendChild(buildSnippetRow(item, visibleRows.length, false));
+    }
+
+    tree.appendChild(group);
+  }
+
+  if (tree.children.length) return;
+
+  const empty = document.createElement('div');
+  empty.className = 'empty';
+  empty.textContent = needle ? t('nothingFound') : t('noSnippets');
+  tree.appendChild(empty);
+}
+
+function paintView() {
+  document.body.classList.toggle('library', view === 'library');
+  tabSessions.classList.toggle('on', view === 'sessions');
+  tabLibrary.classList.toggle('on', view === 'library');
+  filter.placeholder = t(view === 'library' ? 'filterSnippets' : 'filterPlaceholder');
+}
+
+function setView(next) {
+  if (next === view) return;
+
+  commitDraft();
+  view = next;
+  filter.value = '';
+  paintView();
+  drawTop();
+  drawTree();
+}
+
+function promote(text) {
+  setView('library');
+  newSnippet(text);
+}
+
+// PALETTE
+
+function paletteHits() {
+  const needle = paletteInput.value.trim().toLowerCase();
+  return snippets.filter((item) => snippetMatches(item, needle)).slice(0, 40);
+}
+
+function closePalette() {
+  palette.classList.remove('on');
+}
+
+function openPalette() {
+  palette.classList.add('on');
+  paletteInput.value = '';
+  paletteAt = 0;
+  paintPalette();
+  paletteInput.focus();
+}
+
+function paintPalette() {
+  if (!palette.classList.contains('on')) return;
+
+  const hits = paletteHits();
+  paletteAt = Math.min(paletteAt, Math.max(0, hits.length - 1));
+  paletteList.replaceChildren();
+
+  if (!hits.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = snippets.length ? t('nothingFound') : t('noSnippets');
+    paletteList.appendChild(empty);
+    return;
+  }
+
+  hits.forEach((item, index) => {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = index === paletteAt ? 'hit on' : 'hit';
+
+    if (item.group) {
+      const folder = document.createElement('span');
+      folder.className = 'group';
+      folder.textContent = item.group + ' /';
+      row.appendChild(folder);
+    }
+
+    const name = document.createElement('span');
+    name.textContent = item.title;
+    row.appendChild(name);
+
+    const peek = document.createElement('span');
+    peek.className = 'peek';
+    peek.textContent = item.body.replace(/\s+/g, ' ').trim();
+    row.appendChild(peek);
+
+    row.addEventListener('click', () => copyHit(index));
+    paletteList.appendChild(row);
+  });
+}
+
+function copyHit(index) {
+  const item = paletteHits()[index];
+  if (!item) return;
+
+  navigator.clipboard.writeText(item.body).then(() => {
+    const row = paletteList.children[index];
+    if (row) {
+      row.classList.add('done');
+      row.querySelector('.peek').textContent = t('copied');
+    }
+
+    setTimeout(closePalette, 480);
+  }).catch(closePalette);
+}
+
+async function pollSnippets() {
+  try {
+    const response = await fetch('/api/snippets?since=' + encodeURIComponent(snippetsToken));
+    if (response.status === 200) {
+      const payload = await response.json();
+      snippetsToken = payload.token;
+      snippetsHome = payload.home;
+      snippets = payload.snippets;
+      favouriteSlugs = payload.favourites;
+      drawFavourites();
+      paintStar();
+      paintGroups();
+      paintPalette();
+      if (view === 'library') {
+        drawTree();
+        drawTop();
+      }
+    }
+  } catch (error) { /* the server is down; the next tick tries again */ }
+}
+
+async function loopSnippets() {
+  await pollSnippets();
+  setTimeout(loopSnippets, 2500);
+}
+
 // EVENTS
+
+tabSessions.addEventListener('click', () => setView('sessions'));
+tabLibrary.addEventListener('click', () => setView('library'));
+snipNew.addEventListener('click', () => newSnippet(''));
+snipSave.addEventListener('click', saveNow);
+snipStar.addEventListener('click', toggleStar);
+snipDelete.addEventListener('click', deleteNow);
+
+snipCopy.addEventListener('click', () => {
+  navigator.clipboard.writeText(snipBody.value)
+    .then(() => flash(snipCopy, t('copied'), t('copy')));
+});
+
+for (const field of [snipTitle, snipGroup, snipBody]) {
+  field.addEventListener('input', touchDraft);
+}
+
+paletteInput.addEventListener('input', () => {
+  paletteAt = 0;
+  paintPalette();
+});
+
+paletteInput.addEventListener('keydown', (event) => {
+  event.stopPropagation();
+
+  const modified = event.metaKey || event.ctrlKey;
+  const toggling = modified && event.key === 'k';
+  const closing = toggling || event.key === 'Escape';
+  if (closing) {
+    event.preventDefault();
+    closePalette();
+    return;
+  }
+
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    copyHit(paletteAt);
+    return;
+  }
+
+  const stepping = event.key === 'ArrowDown' || event.key === 'ArrowUp';
+  if (!stepping) return;
+
+  event.preventDefault();
+  const hits = paletteHits().length;
+  if (!hits) return;
+
+  const step = event.key === 'ArrowDown' ? 1 : -1;
+  paletteAt = (paletteAt + step + hits) % hits;
+  paintPalette();
+  const row = paletteList.children[paletteAt];
+  if (row) row.scrollIntoView({ block: 'nearest' });
+});
+
+palette.addEventListener('mousedown', (event) => {
+  if (event.target !== palette) return;
+  closePalette();
+});
 
 scroller.addEventListener('scroll', () => {
   pinnedToBottom = atBottom();
@@ -1958,6 +2998,21 @@ window.addEventListener('keydown', (event) => {
     return;
   }
 
+  // The palette answers from anywhere, including mid-transcript: it is the one
+  // shortcut that does not care which view the rail is showing.
+  if (event.key === 'k') {
+    event.preventDefault();
+    openPalette();
+    return;
+  }
+
+  const saving = event.key === 's' && view === 'library';
+  if (saving) {
+    event.preventDefault();
+    saveNow();
+    return;
+  }
+
   const ordinal = Number(event.key);
   const inRange = Number.isInteger(ordinal) && ordinal >= 1 && ordinal <= 9;
   if (!inRange) return;
@@ -1966,6 +3021,12 @@ window.addEventListener('keydown', (event) => {
   if (!id) return;
 
   event.preventDefault();
+
+  if (view === 'library') {
+    openSnippet(id);
+    return;
+  }
+
   onPick(id);
   toBottom(false);
 });
@@ -2104,8 +3165,10 @@ async function pollIndex() {
 
 paintLang();
 paintScope();
+paintView();
 pollState();
 pollIndex();
+loopSnippets();
 </script>
 </body>
 </html>

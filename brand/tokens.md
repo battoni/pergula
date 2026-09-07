@@ -13,6 +13,7 @@ If this file and that block disagree, this file is stale.
 | Secondary surface | `--panel-soft` | `#232020` |
 | Code blocks and inputs | `--code` | `#12100e` |
 | Every border | `--line` | `#322c28` |
+| Delete, armed | `--danger` | `#e06c62` |
 
 Warm near-black throughout, not neutral grey. Battoni Dev's ink `#141413` and
 this canvas `#14120f` measure 1.01 : 1 apart — the same colour in practice.

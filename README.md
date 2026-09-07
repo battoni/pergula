@@ -47,11 +47,14 @@ Default port is `7373`.
 
 | | |
 | --- | --- |
+| `cmd/ctrl + K` | open the snippet palette, from anywhere |
 | `cmd/ctrl + B` | hide or show the session list |
 | `cmd/ctrl + F` | focus the filter |
-| `cmd/ctrl + 1` … `9` | jump to the nth session on the list, in the order shown |
+| `cmd/ctrl + 1` … `9` | jump to the nth row on the list, in the order shown |
+| `cmd/ctrl + S` | save the open snippet |
 | `esc` in the filter | clear it and let go of it |
 | `enter` / `esc` while renaming | keep the project name, or discard it |
+| `↑` `↓` `enter` `esc` in the palette | pick one, copy it, or leave |
 
 Both modifiers are bound on purpose. In an ordinary Chrome tab `cmd+1` belongs to
 the tab strip and never reaches the page; only the window pergula opens for
@@ -81,6 +84,46 @@ Project nicknames live in `~/.claude/pergula-names.json`, next to the transcript
 they rename, so they survive reinstalls and are trivial to inspect or delete by
 hand.
 
+## Snippets
+
+The prompts you send every day are not worth a skill and are tiring to retype.
+The **library** tab keeps them, and `cmd+K` puts one on the clipboard from
+anywhere in the app — type a few letters, press enter, paste. No pointer
+involved, no view change, no leaving the transcript you were reading.
+
+The prompts worth keeping are usually already in a transcript, so every turn of
+your own carries a `keep` button on hover: it promotes that message into the
+library with the text filled in and the cursor on the title.
+
+They are stored as ordinary Markdown, one file per snippet, under
+`~/.claude/pergula-snippets/`:
+
+```
+~/.claude/pergula-snippets/
+  commit-message.md
+  review/pr.md
+  review/security.md
+```
+
+One folder deep, and the folder is the group. The first line is a `# heading`
+that names it and never travels to the clipboard; everything below is the prompt,
+verbatim. Which means the library is `grep`-able, editable in your own editor,
+versionable in git, and syncable — nothing about it depends on this program.
+
+Typing writes the file after a short pause, so there is no unsaved state to lose;
+retitling moves the file and takes the old one with it.
+
+### Favourites
+
+Five of them can be starred, and those five sit in their own block at the top of
+the session list — visible while you read, one click to copy. That is the whole
+interaction: no view change, no palette, no keyboard. The star lives on the
+button beside `copy` in the editor, and goes dim once five are taken.
+
+The list is `~/.claude/pergula-favourites.json`, an ordered array of slugs. It
+follows a retitle and forgets a deleted snippet, and a star pointing at a file
+you removed by hand simply stops appearing.
+
 ## The name
 
 *Pergula* is Latin for the light frame of beams that throws a roof out from the
@@ -93,7 +136,12 @@ nothing indoors — it only gives you somewhere to sit and look back.
 
 ## What it does not do
 
-It never edits, sends, or manages anything. It reads.
+It never writes a byte back to a transcript, and never sends one anywhere. It
+reads them.
+
+The only things it writes are yours: project nicknames and the snippet library,
+both plain files under `~/.claude/`, both readable, editable and deletable
+without this program.
 
 Nothing leaves the machine — no account, no sync, no telemetry, no network call
 of any kind. Even the Claude mark in the interface is drawn in JavaScript rather

@@ -71,6 +71,18 @@ favicon and the header at 20px — plus the served `/icon.png`. All four come fr
 `brand/pergula-icon.svg`; regenerate with `make brand` rather than editing any of
 them by hand.
 
+**The snippet library is files, not a database.** One Markdown file per snippet
+under `~/.claude/pergula-snippets/`, one folder deep for grouping. The first line
+is a `# heading` that titles it and is stripped before the body reaches the
+clipboard. `snippet_slug` is what keeps a title from writing outside that
+directory — it is a security boundary, not a tidiness helper, and the tests treat
+it as one.
+
+The five favourites are the one thing about a snippet that is **not** in its
+file: `~/.claude/pergula-favourites.json` holds slugs, so anything that changes a
+slug has to move the star with it. `write_snippet` and `erase_snippet` already
+do; a third way to move a file would need the same.
+
 **Transcripts only ever grow.** `parse_transcript` relies on that to parse
 incrementally from a saved byte offset. The offset bookkeeping fails silently, so
 change it only with the tests in front of you.
