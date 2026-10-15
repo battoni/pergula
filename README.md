@@ -2,6 +2,8 @@
 
 A local, dependency-free web reader for Claude Code transcripts.
 
+**[Try it in the browser →](https://battoni.github.io/pergula/)** — the real interface over made-up sessions, every shortcut working.
+
 ## The problem
 
 The terminal renders Claude's prose hard-wrapped. Select it with the mouse and

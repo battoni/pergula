@@ -1,0 +1,885 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pergula</title>
+<meta name="description" content="Read your Claude Code transcripts as a web page on 127.0.0.1. One Python file, standard library only, no network request of any kind.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%20512%20512%22%3E%3Cg%20fill%3D%22%23c0e021%22%3E%3Cpath%20d%3D%22M32%2032%20L480%2032%20L480%20128%20L32%20128%20Z%22%2F%3E%3Cpath%20d%3D%22M32%20192%20L288%20192%20L352%20288%20L32%20288%20Z%22%2F%3E%3Cpath%20d%3D%22M288%20352%20L480%20352%20L480%20448%20L352%20448%20Z%22%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E">
+<style>
+  /* The same tokens as the :root block in pergula. That file is the source of truth. */
+  :root {
+    --canvas: #14120f;
+    --rail: #191614;
+    --panel: #1c1917;
+    --panel-soft: #232020;
+    --line: #322c28;
+    --heading: #f2ece4;
+    --body: #ddd5cb;
+    --muted: #9b8f84;
+    --subtle: #6f665e;
+    --accent: #c0e021;
+    --accent-soft: #2a3210;
+    --code: #12100e;
+    --state-working: #6fa8d6;
+    --state-needs-you: #f0a03c;
+    --state-ready: #85b06b;
+    --state-error: #e06c62;
+    --role-you: #6fa8d6;
+    --role-claude: #d97757;
+    --role-tool: #85b06b;
+    --tint-you: #171d24;
+    --tint-claude: #1f1a17;
+    --tint-tool: #171c16;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--canvas); color: var(--body);
+    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, kbd { font-family: var(--mono); font-size: .88em; }
+  kbd {
+    display: inline-block; padding: 1px 7px;
+    background: var(--panel-soft); color: var(--heading);
+    border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 6px;
+  }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 0 20px; }
+
+  /* ---- hero ---- */
+  header.hero { padding: 72px 0 40px; text-align: center; }
+  .lockup { display: inline-flex; align-items: center; gap: 14px; color: var(--accent); }
+  .lockup svg { width: 46px; height: 43px; fill: currentColor; }
+  .lockup span { font-size: 44px; font-weight: 650; letter-spacing: -.02em; }
+  .hero h1 {
+    margin: 26px auto 14px; max-width: 760px;
+    color: var(--heading); font-size: clamp(28px, 4.4vw, 44px); line-height: 1.15; letter-spacing: -.02em;
+  }
+  .hero p.lede { margin: 0 auto; max-width: 640px; color: var(--muted); font-size: 18px; }
+  .install {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: center;
+    margin: 30px auto 0; max-width: 760px;
+  }
+  .install pre {
+    flex: 1 1 520px; min-width: 0; margin: 0; padding: 14px 16px; overflow-x: auto;
+    background: var(--code); border: 1px solid var(--line); border-radius: 12px;
+    color: var(--heading); font: 13.5px/1.6 var(--mono); text-align: left;
+  }
+  .install pre .dim { color: var(--subtle); }
+  button.copy, a.cta {
+    padding: 10px 16px; border-radius: 10px; cursor: pointer;
+    font: inherit; font-size: 14px; font-weight: 600;
+  }
+  button.copy { background: var(--accent-soft); color: var(--heading); border: 1px solid var(--accent); }
+  button.copy:hover { background: #34401a; }
+  a.cta { color: var(--heading); border: 1px solid var(--line); }
+  a.cta:hover { border-color: var(--muted); text-decoration: none; }
+  .claims {
+    display: flex; flex-wrap: wrap; justify-content: center; gap: 8px 22px;
+    margin: 26px 0 0; padding: 0; list-style: none; color: var(--muted); font-size: 14px;
+  }
+  .claims li::before { content: "●"; color: var(--accent); margin-right: 8px; font-size: 9px; vertical-align: 2px; }
+
+  /* ---- live demo ---- */
+  section.try { padding: 24px 0 8px; }
+  .try-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+  .try-head h2 { margin: 0; color: var(--heading); font-size: 22px; }
+  .try-head p { margin: 0; color: var(--muted); font-size: 14px; }
+  .demo {
+    position: relative; display: grid; grid-template-rows: 30px minmax(0, 1fr);
+    height: 560px; overflow: hidden;
+    background: var(--canvas); border: 1px solid var(--line); border-radius: 14px;
+    box-shadow: 0 30px 80px rgba(0, 0, 0, .45);
+    font-size: 14px; outline: none;
+  }
+  .demo:focus-visible { box-shadow: 0 0 0 2px var(--accent), 0 30px 80px rgba(0, 0, 0, .45); }
+  .demo .bar {
+    position: relative; display: flex; align-items: center; gap: 8px; padding: 0 12px;
+    background: var(--rail); border-bottom: 1px solid var(--line);
+  }
+  .demo .bar i { width: 11px; height: 11px; border-radius: 50%; display: block; }
+  .demo .bar .wintitle { position: absolute; left: 50%; transform: translateX(-50%); font-size: 12px; color: var(--subtle); }
+  .demo .bar .wintitle.calls { color: var(--state-needs-you); font-weight: 600; }
+  .demo .bar .held {
+    margin-left: auto; padding: 0 10px; border-radius: 99px; font-size: 11px; line-height: 18px;
+    background: var(--accent-soft); border: 1px solid var(--accent); color: var(--heading);
+  }
+  .demo .bar .held[hidden] { display: none; }
+  .demo .body { display: grid; grid-template-columns: 260px minmax(0, 1fr); min-height: 0; }
+  .demo.railed-off .body { grid-template-columns: minmax(0, 1fr); }
+  .demo.railed-off .rail { display: none; }
+
+  .rail { display: flex; flex-direction: column; min-height: 0; background: var(--rail); border-right: 1px solid var(--line); }
+  .rail .top { padding: 14px 14px 6px; }
+  .rail .mini { display: flex; align-items: center; gap: 8px; color: var(--accent); font-weight: 650; font-size: 18px; margin: 0 0 12px 4px; }
+  .rail .mini svg { width: 20px; height: 19px; fill: currentColor; }
+  .rail input {
+    width: 100%; padding: 6px 10px;
+    background: var(--code); color: var(--body); border: 1px solid var(--line); border-radius: 9px;
+    font: inherit; font-size: 12.5px;
+  }
+  .rail input:focus { outline: none; border-color: var(--accent); }
+  .chip {
+    display: flex; align-items: center; gap: 7px; width: 100%; margin-top: 8px; padding: 5px 10px;
+    background: var(--accent-soft); border: 1px solid var(--accent); border-radius: 8px;
+    color: var(--heading); font: inherit; font-size: 12px; text-align: left; cursor: pointer;
+  }
+  .chip[hidden] { display: none; }
+  .chip b { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chip span:last-child { color: var(--muted); }
+  .tree { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 8px 10px; }
+  .proj { margin-top: 8px; }
+  .tree .none { margin: 10px 8px; color: var(--subtle); font-size: 12.5px; }
+  .proj h4 {
+    display: flex; justify-content: space-between; margin: 0; padding: 3px 8px;
+    color: var(--heading); font-size: 11.5px; font-weight: 700;
+  }
+  .proj h4 span { color: var(--subtle); font-weight: 400; }
+  .row {
+    position: relative; display: flex; align-items: center; gap: 9px; width: 100%;
+    padding: 3px 8px 3px 10px; border: 0; border-radius: 6px; background: none;
+    color: var(--body); font: inherit; font-size: 12.5px; text-align: left; cursor: pointer;
+  }
+  .row:hover { background: var(--panel-soft); }
+  .row.on { background: var(--panel-soft); color: var(--heading); }
+  .row.on::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 2.5px; background: var(--accent); border-radius: 2px; }
+  .row .light { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--subtle); }
+  .row .light.working { background: var(--state-working); }
+  .row .light.ready { background: var(--state-ready); }
+  .row .light.needs { background: var(--state-needs-you); }
+  .row .light.error { background: var(--state-error); }
+  .row .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row .when { flex: none; color: var(--subtle); font-size: 10.5px; }
+  .row .when.needs { color: var(--state-needs-you); font-weight: 600; }
+  .row .when.error { color: var(--state-error); font-weight: 600; }
+  .row .num {
+    flex: none; display: none; min-width: 16px; padding: 0 4px; border-radius: 4px;
+    background: var(--line); color: var(--heading); font-size: 10px; text-align: center;
+  }
+  .demo.mod .row .num { display: inline-block; }
+  .foot { padding: 10px 14px 12px; border-top: 1px solid var(--line); }
+  .foot button {
+    width: 100%; padding: 5px 0; border-radius: 8px; cursor: pointer;
+    background: none; border: 1px solid var(--line); color: var(--muted); font: inherit; font-size: 12px;
+  }
+  .foot button.on { background: var(--accent-soft); border-color: var(--accent); color: var(--heading); }
+  .foot .hours { display: flex; gap: 5px; margin-top: 6px; }
+  .foot .hours[hidden] { display: none; }
+  .foot .hours button { color: var(--body); }
+
+  .pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .ptop { padding: 10px 20px 9px; background: var(--rail); border-bottom: 1px solid var(--line); }
+  .ptop .r1 { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  .ptop .swatch { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); flex: none; }
+  .ptop .title { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--heading); font-weight: 600; font-size: 14.5px; }
+  .ptop .meta { padding-left: 20px; color: var(--subtle); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .icon {
+    position: relative; flex: none; display: flex; align-items: center; justify-content: center;
+    width: 28px; height: 28px; padding: 0; border-radius: 7px; cursor: pointer;
+    background: none; border: 1px solid transparent; color: var(--muted);
+  }
+  .icon:hover { color: var(--heading); background: var(--panel-soft); border-color: var(--line); }
+  .icon.done { color: var(--accent); }
+  .icon svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+  .icon .tip {
+    position: absolute; top: calc(100% + 8px); left: 0; z-index: 4; pointer-events: none;
+    opacity: 0; transition: opacity .12s;
+    padding: 5px 9px; width: max-content; max-width: 280px;
+    background: var(--panel); color: var(--body); border: 1px solid var(--line); border-radius: 7px; font-size: 11.5px;
+  }
+  .icon:hover .tip, .icon:focus-visible .tip { opacity: 1; }
+  .feed { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 22px 30px; }
+  .msg { margin: 0 0 18px; max-width: 640px; }
+  .msg .who { font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; margin-bottom: 5px; }
+  .msg .box { padding: 10px 14px; border: 1px solid var(--line); border-left-width: 3px; border-radius: 10px; }
+  .msg.you .who { color: var(--role-you); } .msg.you .box { background: var(--tint-you); border-left-color: var(--role-you); }
+  .msg.claude .who { color: var(--role-claude); } .msg.claude .box { background: var(--tint-claude); border-left-color: var(--role-claude); }
+  .msg.command .who { color: var(--role-tool); } .msg.command .box { background: var(--tint-tool); border-left-color: var(--role-tool); font-family: var(--mono); font-size: 12.5px; }
+  .msg .box p { margin: 0; }
+  .msg .box code.file { display: inline-block; margin-top: 8px; padding: 3px 9px; background: var(--code); border: 1px solid var(--line); border-radius: 6px; }
+
+  .palette { position: absolute; inset: 30px 0 0; z-index: 6; display: none; align-items: flex-start; justify-content: center; padding-top: 70px; background: rgba(0, 0, 0, .45); }
+  .palette.on { display: flex; }
+  .palette .sheet { width: min(440px, 90%); background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; box-shadow: 0 20px 60px rgba(0, 0, 0, .5); }
+  .palette input { width: 100%; padding: 13px 16px; background: none; border: 0; border-bottom: 1px solid var(--line); color: var(--heading); font: inherit; font-size: 14px; }
+  .palette input:focus { outline: none; }
+  .palette .hits { padding: 6px; }
+  .palette .hit { display: flex; justify-content: space-between; gap: 10px; padding: 7px 10px; border-radius: 7px; cursor: pointer; font-size: 13px; }
+  .palette .hit span { color: var(--subtle); font-size: 11.5px; }
+  .palette .hit.on { background: var(--accent-soft); color: var(--heading); }
+  .palette .none { padding: 10px; color: var(--subtle); font-size: 13px; }
+  .toast {
+    position: absolute; top: 44px; right: 16px; z-index: 8;
+    padding: 6px 12px; border-radius: 8px; font-size: 12.5px; font-weight: 600;
+    background: var(--accent-soft); border: 1px solid var(--accent); color: var(--heading);
+    opacity: 0; transform: translateY(-6px); transition: opacity .15s, transform .15s; pointer-events: none;
+  }
+  .toast.on { opacity: 1; transform: translateY(0); }
+  .keys { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 12px 0 0; padding: 0; list-style: none; color: var(--muted); font-size: 13.5px; }
+
+  /* ---- features ---- */
+  section.features { padding: 56px 0 10px; }
+  .feature { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 36px; align-items: center; padding: 34px 0; border-top: 1px solid var(--line); }
+  .feature:nth-child(even) { grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); }
+  .feature:nth-child(even) .copy { order: 2; }
+  .feature h3 { margin: 0 0 10px; color: var(--heading); font-size: 22px; letter-spacing: -.01em; }
+  .feature .eyebrow { margin: 0 0 6px; color: var(--accent); font-size: 12px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
+  .feature p { margin: 0 0 10px; color: var(--body); }
+  .feature img { display: block; width: 100%; height: auto; border-radius: 12px; }
+
+  section.not { padding: 40px 0; border-top: 1px solid var(--line); }
+  section.not h2 { margin: 0 0 18px; color: var(--heading); font-size: 22px; }
+  .not ul { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin: 0; padding: 0; list-style: none; }
+  .not li { padding: 14px 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; color: var(--muted); font-size: 14.5px; }
+  .not li b { display: block; color: var(--heading); margin-bottom: 4px; }
+
+  footer { padding: 34px 0 60px; border-top: 1px solid var(--line); color: var(--subtle); font-size: 14px; text-align: center; }
+
+  @media (max-width: 760px) {
+    header.hero { padding-top: 44px; }
+    .demo { height: 520px; }
+    .demo .body { grid-template-columns: minmax(0, 1fr); grid-template-rows: 200px minmax(0, 1fr); }
+    .demo .rail { border-right: 0; border-bottom: 1px solid var(--line); }
+    .demo .rail .mini, .demo .foot { display: none; }
+    .feature, .feature:nth-child(even) { grid-template-columns: minmax(0, 1fr); gap: 18px; }
+    .feature:nth-child(even) .copy { order: 0; }
+  }
+</style>
+</head>
+<body>
+
+<header class="hero wrap">
+  <div class="lockup" aria-label="pergula">
+    <svg viewBox="32 32 448 416" aria-hidden="true">
+      <path d="M32 32 L480 32 L480 128 L32 128 Z"/>
+      <path d="M32 192 L288 192 L352 288 L32 288 Z"/>
+      <path d="M288 352 L480 352 L480 448 L352 448 Z"/>
+    </svg>
+    <span>pergula</span>
+  </div>
+
+  <h1>Your Claude Code sessions, as a page you can actually read.</h1>
+
+  <p class="lede">The terminal hard-wraps Claude's prose, so it pastes into your email in pieces. pergula serves the same transcripts on <code>127.0.0.1</code>, where text selects like text — and every open agent is one glance away.</p>
+
+  <div class="install">
+    <pre id="installCmd"><span class="dim">$</span> curl -fsSLO https://raw.githubusercontent.com/battoni/pergula/main/pergula
+<span class="dim">$</span> chmod +x pergula &amp;&amp; ./pergula --install</pre>
+    <button class="copy" id="copyInstall" type="button">copy</button>
+    <a class="cta" href="https://github.com/battoni/pergula">GitHub</a>
+  </div>
+
+  <ul class="claims">
+    <li>one Python file</li>
+    <li>standard library only</li>
+    <li>no network request of any kind</li>
+    <li>never writes to a transcript</li>
+  </ul>
+</header>
+
+<section class="try wrap" aria-labelledby="tryTitle">
+  <div class="try-head">
+    <h2 id="tryTitle">Try it here</h2>
+    <p>Made-up sessions, the real interface. Click inside, then use the keys below.</p>
+  </div>
+
+  <div class="demo" id="demo" tabindex="0" aria-label="A working copy of pergula with made-up sessions">
+    <div class="bar">
+      <i style="background:#ec6a5e"></i><i style="background:#f4bf4f"></i><i style="background:#61c554"></i>
+      <span class="wintitle" id="winTitle">pergula</span>
+      <span class="held" id="held" hidden>☾ sleep held off</span>
+    </div>
+
+    <div class="body">
+      <aside class="rail">
+        <div class="top">
+          <div class="mini">
+            <svg viewBox="32 32 448 416" aria-hidden="true">
+              <path d="M32 32 L480 32 L480 128 L32 128 Z"/>
+              <path d="M32 192 L288 192 L352 288 L32 288 Z"/>
+              <path d="M288 352 L480 352 L480 448 L352 448 Z"/>
+            </svg>
+            pergula
+          </div>
+          <input id="filter" type="search" placeholder="filter project or session" autocomplete="off">
+          <button class="chip" id="chip" type="button" title="show every project again" hidden></button>
+        </div>
+
+        <div class="tree" id="tree"></div>
+
+        <div class="foot">
+          <button id="awake" type="button">keep awake</button>
+          <div class="hours" id="hours" hidden></div>
+        </div>
+      </aside>
+
+      <div class="pane">
+        <div class="ptop">
+          <div class="r1">
+            <span class="swatch"></span>
+            <span class="title" id="title"></span>
+            <button class="icon" id="copyId" type="button" aria-label="copy session id">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M15 6.5V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h.5"/></svg>
+              <span class="tip">session id · copy</span>
+            </button>
+            <button class="icon" id="resume" type="button" aria-label="copy resume prompt">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5v6a3 3 0 0 0 3 3h11"/><path d="M15 10l4 4-4 4"/></svg>
+              <span class="tip">resume in a new session · copy prompt</span>
+            </button>
+          </div>
+          <div class="meta" id="meta"></div>
+        </div>
+        <div class="feed" id="feed"></div>
+      </div>
+    </div>
+
+    <div class="palette" id="palette">
+      <div class="sheet">
+        <input id="paletteInput" type="text" placeholder="copy a snippet… (enter copies)" autocomplete="off">
+        <div class="hits" id="hits"></div>
+      </div>
+    </div>
+
+    <div class="toast" id="toast"></div>
+  </div>
+
+  <ul class="keys">
+    <li><kbd>⌘</kbd> <kbd>1</kbd>…<kbd>9</kbd> jump to a row</li>
+    <li><kbd>⌘</kbd> <kbd>K</kbd> snippet palette</li>
+    <li><kbd>⌘</kbd> <kbd>A</kbd> then <kbd>⌘</kbd> <kbd>F</kbd> focus on one project</li>
+    <li><kbd>⌘</kbd> <kbd>B</kbd> hide the list</li>
+    <li><kbd>ctrl</kbd> works wherever <kbd>⌘</kbd> does</li>
+  </ul>
+</section>
+
+<section class="features wrap" aria-label="Features">
+  <article class="feature">
+    <div class="copy">
+      <p class="eyebrow">Instant</p>
+      <h3>Switching takes no time</h3>
+      <p>A click, or <kbd>⌘</kbd> and the row's number. The sessions you just read are painted from memory while the server confirms them, and a 60&nbsp;MB transcript opens in about half a second.</p>
+    </div>
+    <img src="switch.svg" alt="A click on another session, then cmd+6 and cmd+3: the transcript changes in the same moment" loading="lazy">
+  </article>
+
+  <article class="feature">
+    <div class="copy">
+      <p class="eyebrow">At a glance</p>
+      <h3>Know which agent is waiting on you</h3>
+      <p>Every open agent carries a light: working, ready, <b>needs you</b> or error. The ones waiting on a permission or a question are counted in the window title and on the Dock icon, so the one that stopped to ask does not sit there for minutes.</p>
+    </div>
+    <img src="states.svg" alt="An agent turns to needs you, the window title counts it, and a click takes you to it" loading="lazy">
+  </article>
+
+  <article class="feature">
+    <div class="copy">
+      <p class="eyebrow">One project</p>
+      <h3>Focus, when there is one thing to do</h3>
+      <p><kbd>⌘</kbd> <kbd>A</kbd> then <kbd>⌘</kbd> <kbd>F</kbd> takes every other project off the list until you say so. It survives a reload, and a click on the chip brings the rest back.</p>
+    </div>
+    <img src="focus.svg" alt="cmd+A then cmd+F leaves one project on the list; a click on the chip brings the others back" loading="lazy">
+  </article>
+
+  <article class="feature">
+    <div class="copy">
+      <p class="eyebrow">Snippets</p>
+      <h3>The prompts you send every day, one key away</h3>
+      <p><kbd>⌘</kbd> <kbd>K</kbd> from anywhere, a few letters, enter, paste. Any turn of yours becomes a snippet with one click, and the library is plain Markdown files you can grep, edit and commit.</p>
+    </div>
+    <img src="palette.svg" alt="cmd+K, three letters and enter put a snippet on the clipboard" loading="lazy">
+  </article>
+
+  <article class="feature">
+    <div class="copy">
+      <p class="eyebrow">Cheaper context</p>
+      <h3>Pick a session back up without paying for all of it</h3>
+      <p>A session left for a few hours has lost its prompt cache. The arrow beside its id copies the end of the conversation, without the commands and their output, so a fresh session starts from a page of text instead of from everything.</p>
+    </div>
+    <img src="resume.svg" alt="The arrow beside the session id copies a resume prompt, pasted into a new session in the terminal" loading="lazy">
+  </article>
+
+  <article class="feature">
+    <div class="copy">
+      <p class="eyebrow">Overnight</p>
+      <h3>Keep the Mac awake while the agents finish</h3>
+      <p>One, two, four or eight hours of <code>caffeinate</code> from the window that is already open, with the time left on the button. A restart cleans up after itself; nothing is left on by accident.</p>
+    </div>
+    <img src="awake.svg" alt="keep awake, two hours: the countdown runs in the sidebar while the agent finishes its work" loading="lazy">
+  </article>
+</section>
+
+<section class="not wrap" aria-labelledby="notTitle">
+  <h2 id="notTitle">What it does not do</h2>
+  <ul>
+    <li><b>Talk to the network.</b> No fonts, no CDN, no analytics. The page is served from 127.0.0.1 and asks nothing of anywhere else.</li>
+    <li><b>Touch your transcripts.</b> It reads them. Nicknames, snippets and favourites are its own plain files under <code>~/.claude</code>.</li>
+    <li><b>Need installing.</b> One executable Python file and the standard library. No build step, no dependencies, no account.</li>
+  </ul>
+</section>
+
+<footer class="wrap">
+  <a href="https://github.com/battoni/pergula">github.com/battoni/pergula</a> · MIT licence · the sessions on this page are made up
+</footer>
+
+<script>
+// A working copy of the interface over made-up data. Nothing here talks to a server.
+const PROJECTS = [
+  { name: 'LEDGER', path: '~/Work/ledger', sessions: [
+    { id: '4c1e9a20-ledger', title: 'Reconcile the March imports', branch: 'main', state: 'ready', when: '12m', turns: [
+      ['you', 'Three rows in March do not match the bank. Find out why before we close the month.'],
+      ['claude', 'Two are one import run twice on the 14th; the third is a fee the bank books a day late.', 'imports/march.csv · 3 rows'],
+      ['command', 'python reconcile.py --month 3  ·  0 left'],
+    ] },
+  ] },
+  { name: 'atlas-api', path: '~/Work/atlas-api', sessions: [
+    { id: '91b0f3d2-atlas', title: 'Rate limits on the public routes', branch: 'limits', state: 'needs', when: '3m', turns: [
+      ['you', 'Put a rate limit on every public route. Sixty a minute per key is fine for now.'],
+      ['claude', 'The middleware is in. Before I run the migration that adds the counters table, I need your go-ahead.', 'api/middleware/limit.ts · +74'],
+    ] },
+  ] },
+  { name: 'ORCHARD', path: '~/Work/orchard', sessions: [
+    { id: 'f2a7c811-orchard', title: 'Wire checkout to the tax rules', branch: 'main', state: 'working', when: 'now', turns: [
+      ['you', 'The tax table changed on the first. Make checkout read the new rates and keep the old ones for refunds.'],
+      ['claude', 'Done. Rates now come from the dated table, so a refund uses the rate of the day it was paid.', 'checkout/tax.py · +48 −12'],
+      ['command', 'make test  ·  212 passed'],
+    ] },
+    { id: '07d5be6c-orchard', title: 'Seed the spring catalogue', branch: 'seed', state: 'ready', when: '1h', turns: [
+      ['you', 'Seed forty products for the spring catalogue, with photos from the fixtures folder.'],
+      ['claude', 'Forty products and their photos are in. Six had no photo, so they use the placeholder.', 'db/seeds/spring.py · +212'],
+    ] },
+    { id: 'a83e10f4-orchard', title: 'Review: supplier onboarding', branch: 'review', state: '', when: 'yesterday', turns: [
+      ['you', 'Review the supplier onboarding branch before I merge it.'],
+      ['claude', 'Two things before merging: the tax id is never validated, and a failed upload leaves the supplier half created.'],
+    ] },
+  ] },
+  { name: 'BRIGHTSIDE', path: '~/Work/brightside', sessions: [
+    { id: 'c4d29e57-bright', title: 'Landing page copy, second pass', branch: 'copy-pass', state: 'working', when: '5m', turns: [
+      ['you', 'Shorter. No heading over six words, and lose the second testimonial.'],
+      ['claude', 'Five sections now. The hero reads “Bright books, fair prices.”', 'src/pages/index.astro · +9 −31'],
+      ['command', 'npm run build  ·  12 pages'],
+    ] },
+  ] },
+  { name: 'pergula', path: '~/Work/pergula', sessions: [
+    { id: 'e19f0b3a-pergula', title: 'Two-line header for portrait', branch: 'main', state: 'ready', when: '2h', turns: [
+      ['you', 'I read on a vertical screen. Give the top bar two lines so everything stays visible.'],
+      ['claude', 'The title and its buttons are on the first line, the folder and branch on the second. The title gives way before a button does.'],
+    ] },
+  ] },
+];
+
+const SNIPPETS = [
+  ['Review the diff before commit', 'review', 'Review the staged diff for bugs and anything I would regret merging. Say what you found before changing a line.'],
+  ['Review: security pass', 'review', 'Read this change as an attacker would. List what a hostile input could reach, then fix only what is real.'],
+  ['Write the commit message', 'git', 'Write the commit message: one line that says what changed, then why, in prose.'],
+  ['Explain it as a PR description', 'docs', 'Explain this branch as a pull request description: the problem, the change, and how it was tested.'],
+  ['Tests first, then the fix', 'code', 'Write a failing test that shows the bug, then the smallest change that makes it pass.'],
+  ['Resume where we stopped', 'sessions', 'Tell me in a few lines where we stopped and what is left, before doing anything else.'],
+];
+
+const demo = document.getElementById('demo');
+const tree = document.getElementById('tree');
+const filter = document.getElementById('filter');
+const chip = document.getElementById('chip');
+const titleEl = document.getElementById('title');
+const metaEl = document.getElementById('meta');
+const feed = document.getElementById('feed');
+const winTitle = document.getElementById('winTitle');
+const palette = document.getElementById('palette');
+const paletteInput = document.getElementById('paletteInput');
+const hitsEl = document.getElementById('hits');
+const toast = document.getElementById('toast');
+const awake = document.getElementById('awake');
+const hours = document.getElementById('hours');
+const held = document.getElementById('held');
+
+let selectedId = 'f2a7c811-orchard';
+let focusName = '';
+let visibleRows = [];
+let paletteHits = [];
+let paletteIndex = 0;
+let chordAt = 0;
+let awakeUntil = 0;
+
+const CHORD_MS = 1000;
+const LOUD = { needs: 'needs you', error: 'error' };
+
+function allSessions() {
+  return PROJECTS.flatMap((project) => project.sessions.map((session) => ({ project, session })));
+}
+
+function current() {
+  return allSessions().find((entry) => entry.session.id === selectedId);
+}
+
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function drawTree() {
+  const needle = filter.value.trim().toLowerCase();
+  tree.replaceChildren();
+  visibleRows = [];
+
+  for (const project of PROJECTS) {
+    const outOfFocus = focusName && project.name !== focusName;
+    if (outOfFocus) continue;
+
+    const hits = project.sessions.filter((session) => (project.name + ' ' + session.title).toLowerCase().includes(needle));
+    if (!hits.length) continue;
+
+    const group = el('div', 'proj');
+    const head = el('h4', '', project.name);
+    head.appendChild(el('span', '', String(hits.length)));
+    group.appendChild(head);
+
+    for (const session of hits) {
+      visibleRows.push(session.id);
+      group.appendChild(buildRow(session, visibleRows.length));
+    }
+
+    tree.appendChild(group);
+  }
+
+  if (!visibleRows.length) tree.appendChild(el('p', 'none', 'nothing found'));
+
+  chip.hidden = !focusName;
+  chip.replaceChildren(el('span', '', 'focus'), el('b', '', focusName), el('span', '', '⌘A F'));
+
+  const waiting = allSessions().filter((entry) => entry.session.state === 'needs').length;
+  winTitle.textContent = waiting ? `(${waiting}) pergula` : 'pergula';
+  winTitle.classList.toggle('calls', waiting > 0);
+}
+
+function buildRow(session, ordinal) {
+  const row = el('button', 'row');
+  row.type = 'button';
+  row.classList.toggle('on', session.id === selectedId);
+
+  row.appendChild(el('span', 'light ' + session.state));
+  row.appendChild(el('span', 'name', session.title));
+
+  // The two states that ask for something take the place of the time.
+  const loud = LOUD[session.state];
+  const when = el('span', 'when', loud || session.when);
+  if (loud) when.classList.add(session.state);
+  row.appendChild(when);
+
+  const hasNumber = ordinal <= 9;
+  if (hasNumber) row.appendChild(el('span', 'num', String(ordinal)));
+
+  row.addEventListener('click', () => pick(session.id));
+  return row;
+}
+
+function drawPane() {
+  const entry = current();
+  if (!entry) return;
+
+  titleEl.textContent = entry.session.title;
+  titleEl.title = entry.session.title;
+  metaEl.textContent = entry.project.path + '  ·  ' + entry.session.branch;
+  feed.replaceChildren();
+
+  for (const [who, text, file] of entry.session.turns) {
+    const message = el('div', 'msg ' + who);
+    message.appendChild(el('div', 'who', who));
+    const box = el('div', 'box');
+    box.appendChild(el('p', '', text));
+    if (file) box.appendChild(el('code', 'file', file));
+    message.appendChild(box);
+    feed.appendChild(message);
+  }
+}
+
+function pick(id) {
+  selectedId = id;
+
+  // Reading the agent that asked for you is the answer it was waiting for.
+  const entry = current();
+  if (entry.session.state === 'needs') entry.session.state = 'working';
+
+  drawTree();
+  drawPane();
+}
+
+function say(text) {
+  toast.textContent = '✓ ' + text;
+  toast.classList.add('on');
+  clearTimeout(say.timer);
+  say.timer = setTimeout(() => toast.classList.remove('on'), 1400);
+}
+
+function copy(text, label) {
+  const done = () => say(label);
+  if (!navigator.clipboard) {
+    done();
+    return;
+  }
+
+  navigator.clipboard.writeText(text).then(done, done);
+}
+
+function toggleFocus() {
+  if (focusName) {
+    focusName = '';
+    drawTree();
+    return;
+  }
+
+  focusName = current().project.name;
+  drawTree();
+}
+
+function resumePrompt() {
+  const { project, session } = current();
+  const said = session.turns.filter(([who]) => who !== 'command').map(([who, text]) => `${who === 'you' ? 'YOU' : 'CLAUDE'}: ${text}`);
+  return [
+    'I am picking up here the work of an earlier Claude Code session. Reopening that one would pay for its whole context again, so below is only the end of it.',
+    '',
+    `Session: ${session.title} (${session.id})`,
+    `Project: ${project.path}`,
+    '',
+    'Last messages, without commands or their output:',
+    ...said,
+  ].join('\n');
+}
+
+// ---- palette
+
+function openPalette() {
+  palette.classList.add('on');
+  paletteInput.value = '';
+  drawHits();
+  paletteInput.focus();
+}
+
+function closePalette() {
+  palette.classList.remove('on');
+  demo.focus();
+}
+
+function drawHits() {
+  const needle = paletteInput.value.trim().toLowerCase();
+  paletteHits = SNIPPETS.filter(([title, group]) => (title + ' ' + group).toLowerCase().includes(needle));
+  paletteIndex = Math.min(paletteIndex, Math.max(paletteHits.length - 1, 0));
+  hitsEl.replaceChildren();
+
+  if (!paletteHits.length) {
+    hitsEl.appendChild(el('div', 'none', 'nothing found'));
+    return;
+  }
+
+  paletteHits.forEach(([title, group], index) => {
+    const hit = el('div', 'hit' + (index === paletteIndex ? ' on' : ''), title);
+    hit.appendChild(el('span', '', group));
+    hit.addEventListener('click', () => usePalette(index));
+    hitsEl.appendChild(hit);
+  });
+}
+
+function usePalette(index) {
+  const hit = paletteHits[index];
+  if (!hit) return;
+
+  closePalette();
+  copy(hit[2], 'copied');
+}
+
+paletteInput.addEventListener('input', () => {
+  paletteIndex = 0;
+  drawHits();
+});
+
+paletteInput.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    closePalette();
+    return;
+  }
+
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    usePalette(paletteIndex);
+    return;
+  }
+
+  const step = { ArrowDown: 1, ArrowUp: -1 }[event.key];
+  if (!step) return;
+
+  event.preventDefault();
+  const count = paletteHits.length;
+  if (!count) return;
+
+  paletteIndex = (paletteIndex + step + count) % count;
+  drawHits();
+});
+
+palette.addEventListener('click', (event) => {
+  if (event.target === palette) closePalette();
+});
+
+// ---- keep awake
+
+function paintAwake() {
+  const left = awakeUntil - Date.now();
+  const running = left > 0;
+  awake.classList.toggle('on', running);
+  held.hidden = !running;
+
+  if (!running) {
+    awake.textContent = 'keep awake';
+    return;
+  }
+
+  const minutes = Math.ceil(left / 60000);
+  awake.textContent = `awake · ${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, '0')}`;
+}
+
+awake.addEventListener('click', () => {
+  if (awakeUntil > Date.now()) {
+    awakeUntil = 0;
+    paintAwake();
+    return;
+  }
+
+  hours.hidden = !hours.hidden;
+});
+
+for (const count of [1, 2, 4, 8]) {
+  const button = el('button', '', count + 'h');
+  button.type = 'button';
+  button.addEventListener('click', () => {
+    awakeUntil = Date.now() + count * 3600000;
+    hours.hidden = true;
+    paintAwake();
+  });
+  hours.appendChild(button);
+}
+
+setInterval(paintAwake, 15000);
+
+// ---- the agents keep moving, the way real ones do
+
+const LIFE = [
+  ['91b0f3d2-atlas', 'working'], ['c4d29e57-bright', 'ready'], ['07d5be6c-orchard', 'working'],
+  ['91b0f3d2-atlas', 'ready'], ['f2a7c811-orchard', 'needs'], ['c4d29e57-bright', 'working'],
+  ['07d5be6c-orchard', 'ready'], ['91b0f3d2-atlas', 'needs'], ['f2a7c811-orchard', 'working'],
+];
+let lifeStep = 0;
+
+setInterval(() => {
+  const [id, state] = LIFE[lifeStep % LIFE.length];
+  lifeStep += 1;
+
+  const entry = allSessions().find((candidate) => candidate.session.id === id);
+  const beingRead = id === selectedId && state === 'needs';
+  if (beingRead) return;
+
+  entry.session.state = state;
+  entry.session.when = state === 'working' ? 'now' : entry.session.when;
+  drawTree();
+}, 4500);
+
+// ---- keys, only while the demo has focus, so the rest of the page keeps its own
+
+demo.addEventListener('keydown', (event) => {
+  const hasModifier = event.metaKey || event.ctrlKey;
+  demo.classList.toggle('mod', hasModifier);
+  if (!hasModifier) return;
+  if (event.altKey) return;
+
+  const onlyModifier = event.key === 'Meta' || event.key === 'Control';
+  if (onlyModifier) return;
+
+  if (event.key === 'a') {
+    chordAt = performance.now();
+    event.preventDefault();
+    return;
+  }
+
+  const closesChord = event.key === 'f' && performance.now() - chordAt < CHORD_MS;
+  chordAt = 0;
+  if (closesChord) {
+    event.preventDefault();
+    toggleFocus();
+    return;
+  }
+
+  if (event.key === 'f') {
+    event.preventDefault();
+    filter.focus();
+    return;
+  }
+
+  if (event.key === 'k') {
+    event.preventDefault();
+    openPalette();
+    return;
+  }
+
+  if (event.key === 'b') {
+    event.preventDefault();
+    demo.classList.toggle('railed-off');
+    return;
+  }
+
+  const id = visibleRows[Number(event.key) - 1];
+  if (!id) return;
+
+  event.preventDefault();
+  pick(id);
+});
+
+demo.addEventListener('keyup', (event) => {
+  const stillHeld = event.metaKey || event.ctrlKey;
+  demo.classList.toggle('mod', stillHeld);
+});
+
+demo.addEventListener('focusout', () => demo.classList.remove('mod'));
+
+demo.addEventListener('mousedown', (event) => {
+  const onControl = event.target.closest('input, button');
+  if (onControl) return;
+
+  demo.focus();
+});
+
+filter.addEventListener('input', drawTree);
+filter.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return;
+
+  filter.value = '';
+  drawTree();
+  demo.focus();
+});
+
+chip.addEventListener('click', toggleFocus);
+document.getElementById('copyId').addEventListener('click', () => copy(selectedId, 'id copied'));
+document.getElementById('resume').addEventListener('click', () => copy(resumePrompt(), 'prompt copied'));
+
+document.getElementById('copyInstall').addEventListener('click', (event) => {
+  const text = 'curl -fsSLO https://raw.githubusercontent.com/battoni/pergula/main/pergula\nchmod +x pergula && ./pergula --install';
+  const button = event.currentTarget;
+  const settle = () => {
+    button.textContent = 'copied';
+    setTimeout(() => { button.textContent = 'copy'; }, 1400);
+  };
+  if (!navigator.clipboard) return;
+
+  navigator.clipboard.writeText(text).then(settle, settle);
+});
+
+drawTree();
+drawPane();
+paintAwake();
+</script>
+</body>
+</html>
