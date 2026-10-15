@@ -50,6 +50,7 @@ Default port is `7373`.
 | `cmd/ctrl + K` | open the snippet palette, from anywhere |
 | `cmd/ctrl + B` | hide or show the session list |
 | `cmd/ctrl + F` | focus the filter |
+| `cmd/ctrl + A`, then `F` | focus: only the open session's project on the list; again to leave |
 | `cmd/ctrl + 1` … `9` | jump to the nth row on the list, in the order shown |
 | `cmd/ctrl + S` | save the open snippet |
 | `esc` in the filter | clear it and let go of it |

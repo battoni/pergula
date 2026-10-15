@@ -201,6 +201,25 @@ _MESSAGE_CACHE: dict[str, tuple[int, list[dict]]] = {}
 MESSAGE_CACHE_LIMIT = 8
 _CACHE_LOCK = threading.Lock()
 
+# One parse per file at a time. The page asks again every 700 ms, so a cold 60 MB
+# transcript drew a second and a third full parse while the first was still
+# running; under the GIL each one slowed the others, and the whole server with
+# them. Whoever arrives second waits and then reads the cache.
+_PARSE_LOCKS: dict[str, threading.Lock] = {}
+
+# Screenshots travel inside the transcript as base64 — twice, as the image block's
+# "data" and the tool result's "base64" — and are most of a heavy file's bytes.
+# Nothing here draws them, so they are cut before json.loads has to walk them.
+# Inside a JSON string these keys would read \"data\":\", so only real keys match.
+BLOB_KEYS = (b'"data":"', b'"base64":"')
+BLOB_MIN = 256
+
+# A record whose first key is its type says what it is in its first bytes. The
+# CLI writes api-request records that way — a third of a heavy file, never shown —
+# while the turns themselves open with parentUuid and are parsed in full.
+TYPED_OPENING = b'{"type":"'
+SHOWN_OPENINGS = tuple(TYPED_OPENING + kind.encode() + b'"' for kind in CONVERSATION_TYPES)
+
 # One assertion at a time. A second `caffeinate` would keep the Mac awake
 # behind the one the page knows about, with no way to reach it.
 _CAFFEINE = {"child": None, "until": 0.0}
@@ -758,11 +777,45 @@ def build_index(scope: Path | None) -> dict:
     }
 
 
+def drop_blobs(line: bytes) -> bytes:
+    """The line with every long base64 value emptied. Base64 holds no quote, so
+    the end of the value is the next one."""
+    for key in BLOB_KEYS:
+        start = line.find(key)
+        if start == -1:
+            continue
+
+        parts = []
+        cursor = 0
+        while start != -1:
+            value = start + len(key)
+            end = line.find(b'"', value)
+            if end == -1:
+                break
+
+            long_enough = end - value >= BLOB_MIN
+            if long_enough:
+                parts.append(line[cursor:value])
+                cursor = end
+
+            start = line.find(key, end)
+
+        parts.append(line[cursor:])
+        line = b"".join(parts)
+
+    return line
+
+
+def worth_parsing(line: bytes) -> bool:
+    hidden = line.startswith(TYPED_OPENING) and not line.startswith(SHOWN_OPENINGS)
+    return not hidden
+
+
 def parse_lines(lines, messages: list[dict]) -> None:
     for line in lines:
         try:
             record = json.loads(line)
-        except json.JSONDecodeError:
+        except ValueError:
             continue
 
         if record.get("type") not in CONVERSATION_TYPES:
@@ -835,6 +888,15 @@ def state_token(path: Path, limit: int) -> str:
 
 def parse_transcript(path: Path) -> list[dict]:
     key = str(path)
+
+    with _CACHE_LOCK:
+        parse_lock = _PARSE_LOCKS.setdefault(key, threading.Lock())
+
+    with parse_lock:
+        return parse_transcript_locked(path, key)
+
+
+def parse_transcript_locked(path: Path, key: str) -> list[dict]:
     size = path.stat().st_size
 
     with _CACHE_LOCK:
@@ -861,8 +923,10 @@ def parse_transcript(path: Path) -> list[dict]:
     if end == -1:
         return messages
 
-    text = chunk[: end + 1].decode("utf-8", errors="replace")
-    parse_lines(text.splitlines(), messages)
+    # Bytes all the way to json.loads: decoding 60 MB to str and splitting that
+    # cost more than the parse itself.
+    lines = (drop_blobs(line) for line in chunk[:end].split(b"\n") if worth_parsing(line))
+    parse_lines(lines, messages)
 
     with _CACHE_LOCK:
         _MESSAGE_CACHE.pop(key, None)
@@ -1152,6 +1216,9 @@ PAGE = r"""<!doctype html>
     /* The only destructive colour: the delete button, armed. */
     --danger: #e06c62;
     --rail-width: 288px;
+    /* The scrollbar at rest: the brand lime, dimmed so it does not compete with
+       the text it scrolls. It lights to --accent under the pointer. */
+    --scroll-rest: #6d8214;
 
     /* What an open agent is doing: the same four colours as the emoji the
        tab-status hooks put in the terminal tab title. */
@@ -1184,8 +1251,19 @@ PAGE = r"""<!doctype html>
   body.railed-off { grid-template-columns: minmax(0, 1fr); }
   body.railed-off #rail { display: none; }
 
+  /* Scrollbars: drawn rather than left to the system, which paints a white
+     track on a dark page when macOS is set to always show them. */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    background: var(--scroll-rest);
+    border: 3px solid transparent; border-radius: 999px; background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-thumb:hover, ::-webkit-scrollbar-thumb:active { background-color: var(--accent); }
+
   /* ---- sidebar ---- */
   #rail {
+    position: relative;
     height: 100vh;
     display: flex; flex-direction: column;
     background: var(--rail);
@@ -1193,6 +1271,19 @@ PAGE = r"""<!doctype html>
     overflow: hidden;
   }
   #rail .rail-top { padding: 12px 12px 9px; border-bottom: 1px solid var(--line); }
+  /* The grip lies along the rail's right edge, inside it because the rail
+     clips; the line it draws is that edge lit up, so at rest there is nothing
+     extra on screen. */
+  .rail-grip {
+    position: absolute; top: 0; right: 0; bottom: 0; width: 7px; z-index: 5;
+    cursor: col-resize; touch-action: none;
+  }
+  .rail-grip::after {
+    content: ""; position: absolute; top: 0; bottom: 0; right: 0; width: 2px;
+    background: transparent; transition: background .15s;
+  }
+  .rail-grip:hover::after, body.resizing .rail-grip::after { background: var(--accent); }
+  body.resizing { cursor: col-resize; user-select: none; }
   /* The lockup, outlined: no external font, like the rest of the page. */
   #rail .logo { display: block; height: 38px; width: auto; fill: var(--accent);
                 margin: 4px auto 16px; }
@@ -1203,6 +1294,17 @@ PAGE = r"""<!doctype html>
     font: inherit; font-size: 13px;
   }
   #filter:focus { outline: none; border-color: var(--accent); }
+  /* Focus: one project on the list and nothing else. The chip is the only sign
+     of it, so it has to be impossible to miss, and it is also the way out. */
+  #focusChip {
+    display: flex; align-items: center; gap: 7px; width: 100%;
+    margin-top: 9px; padding: 5px 10px;
+    background: var(--accent-soft); border: 1px solid var(--accent); border-radius: 8px;
+    color: var(--heading); font: inherit; font-size: 11.5px; text-align: left; cursor: pointer;
+  }
+  #focusChip[hidden] { display: none; }
+  #focusChip .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+  #focusChip .keys { color: var(--muted); flex: none; }
   .scope { display: flex; gap: 4px; margin-top: 9px; }
   .scope button {
     flex: 1; padding: 4px 0;
@@ -1475,21 +1577,29 @@ PAGE = r"""<!doctype html>
 
   /* ---- pane ---- */
   #pane { min-width: 0; height: 100vh; display: flex; flex-direction: column; }
+  /* Two lines, so a portrait screen keeps everything in view: the session and
+     its two buttons above, where it lives below. The title gives way first and
+     ends in an ellipsis; the buttons never leave. */
   #top {
     flex: none;
-    display: flex; align-items: center; gap: 11px; flex-wrap: nowrap;
-    padding: 11px 22px;
+    display: flex; flex-direction: column; gap: 3px;
+    padding: 9px 22px 8px;
     background: var(--rail);
     border-bottom: 1px solid var(--line);
     font-size: 12.5px; color: var(--muted);
   }
+  #top .top-row { display: flex; align-items: center; gap: 11px; min-width: 0; }
   #top .swatch { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); flex: none; }
   /* The mark: a paragraph with a line snapped in two. See brand/BRAND.md.
      It shows only while the list is hidden — with the list open the sidebar
      lockup already carries the identity, and two marks would compete. */
   #top .brand { display: none; width: 21.5px; height: 20px; flex: none; fill: var(--accent); }
   body.railed-off #top .brand { display: block; }
-  #top .title { color: var(--heading); font-weight: 600; font-size: 14px; white-space: nowrap; }
+  #top .title {
+    flex: 0 1 auto; min-width: 0;
+    color: var(--heading); font-weight: 600; font-size: 14px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
   /* Icon button. The list toggle uses a side-panel icon rather than a burger:
      the mark is already three horizontal lines and the two would be confused. */
   #top .iconbtn {
@@ -1529,12 +1639,16 @@ PAGE = r"""<!doctype html>
   }
   #top .iconbtn:hover .tip,
   #top .iconbtn:focus-visible .tip { opacity: 1; transform: translateY(0); }
+  /* Under the title, not under the buttons before it: the toggle and the
+     swatch are 28 + 10 px with an 11 px gap after each. */
   #top .meta {
-    flex: 1 1 auto; min-width: 0;
+    min-width: 0; padding-left: 60px;
     color: var(--subtle); white-space: nowrap;
     overflow: hidden; text-overflow: ellipsis;
   }
-  #top .title, #top button { flex: none; }
+  body.railed-off #top .meta { padding-left: 92.5px; }
+  #top .meta:empty { display: none; }
+  #top button { flex: none; }
 
   #scroller { flex: 1; min-height: 0; overflow-y: auto; }
   #feed { max-width: 860px; margin: 0 auto; padding: 22px 22px 12vh; }
@@ -1631,6 +1745,7 @@ PAGE = r"""<!doctype html>
 <body>
 
 <aside id="rail">
+  <div class="rail-grip" id="railGrip" role="separator" aria-orientation="vertical" data-i18n-title="resizeRail"></div>
   <div class="rail-top">
     <svg class="logo" viewBox="0 0 1744 512" role="img" aria-label="pergula">
       <g id="icon">
@@ -1656,6 +1771,8 @@ PAGE = r"""<!doctype html>
     </div>
 
     <input id="filter" type="search" data-i18n-ph="filterPlaceholder" autocomplete="off">
+
+    <button id="focusChip" class="sessions-only" type="button" data-i18n-title="focusOff" hidden></button>
 
     <div class="scope library-only">
       <button id="snipNew" type="button" data-i18n="newSnippet"></button>
@@ -1702,39 +1819,41 @@ PAGE = r"""<!doctype html>
 
 <div id="pane">
   <div id="top">
-    <svg class="brand" viewBox="32 32 448 416" aria-hidden="true">
-      <path d="M32 32 L480 32 L480 128 L32 128 Z"/>
-      <path d="M32 192 L288 192 L352 288 L32 288 Z"/>
-      <path d="M288 352 L480 352 L480 448 L352 448 Z"/>
-    </svg>
-
-    <button class="iconbtn" id="railToggle" type="button" aria-label="ocultar lista">
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <rect x="3.5" y="4.5" width="17" height="15" rx="2"/>
-        <path d="M9.5 4.5v15"/>
+    <div class="top-row">
+      <svg class="brand" viewBox="32 32 448 416" aria-hidden="true">
+        <path d="M32 32 L480 32 L480 128 L32 128 Z"/>
+        <path d="M32 192 L288 192 L352 288 L32 288 Z"/>
+        <path d="M288 352 L480 352 L480 448 L352 448 Z"/>
       </svg>
-      <span class="tip" id="railTip">ocultar lista &#183; cmd+B</span>
-    </button>
 
-    <span class="swatch" id="swatch"></span>
+      <button class="iconbtn" id="railToggle" type="button" aria-label="ocultar lista">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="3.5" y="4.5" width="17" height="15" rx="2"/>
+          <path d="M9.5 4.5v15"/>
+        </svg>
+        <span class="tip" id="railTip">ocultar lista &#183; cmd+B</span>
+      </button>
 
-    <span class="title" id="title" data-i18n="connecting"></span>
+      <span class="swatch" id="swatch"></span>
 
-    <button class="iconbtn" id="copySid" type="button" data-i18n-aria="copyIdLabel">
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <rect x="9" y="9" width="11" height="11" rx="2"/>
-        <path d="M15 6.5V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h.5"/>
-      </svg>
-      <span class="tip" id="sidTip" data-i18n="sessionId"></span>
-    </button>
+      <span class="title" id="title" data-i18n="connecting"></span>
 
-    <button class="iconbtn" id="copyResume" type="button" data-i18n-aria="resumeLabel">
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M5 5v6a3 3 0 0 0 3 3h11"/>
-        <path d="M15 10l4 4-4 4"/>
-      </svg>
-      <span class="tip" id="resumeTip" data-i18n="resumeHint"></span>
-    </button>
+      <button class="iconbtn" id="copySid" type="button" data-i18n-aria="copyIdLabel">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="9" y="9" width="11" height="11" rx="2"/>
+          <path d="M15 6.5V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h.5"/>
+        </svg>
+        <span class="tip" id="sidTip" data-i18n="sessionId"></span>
+      </button>
+
+      <button class="iconbtn" id="copyResume" type="button" data-i18n-aria="resumeLabel">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M5 5v6a3 3 0 0 0 3 3h11"/>
+          <path d="M15 10l4 4-4 4"/>
+        </svg>
+        <span class="tip" id="resumeTip" data-i18n="resumeHint"></span>
+      </button>
+    </div>
 
     <span class="meta" id="meta"></span>
   </div>
@@ -1804,7 +1923,10 @@ const metaEl = document.getElementById('meta');
 const copySid = document.getElementById('copySid');
 const copyResume = document.getElementById('copyResume');
 const resumeTip = document.getElementById('resumeTip');
+const rail = document.getElementById('rail');
+const railGrip = document.getElementById('railGrip');
 const railToggle = document.getElementById('railToggle');
+const focusChip = document.getElementById('focusChip');
 const toggles = {
   tools: document.getElementById('showTools'),
   results: document.getElementById('showResults'),
@@ -1818,11 +1940,13 @@ let selectedId = null;
 let messages = [];
 let rendered = [];
 let total = 0;
-let limit = 400;
+const DEFAULT_LIMIT = 400;
+let limit = DEFAULT_LIMIT;
 let session = null;
 let resume = null;
 let pinnedToBottom = true;
 let collapsed = new Set(JSON.parse(localStorage.getItem('pergula:collapsed') || '[]'));
+let focusPath = localStorage.getItem('pergula:focus') || '';
 
 const tabSessions = document.getElementById('tabSessions');
 const tabLibrary = document.getElementById('tabLibrary');
@@ -1867,6 +1991,8 @@ const STRINGS = {
     followLive: 'seguir a sessão ativa',
     showCommands: 'comandos', showOutputs: 'saídas',
     hideList: 'ocultar lista', showList: 'mostrar lista',
+    resizeRail: 'arraste para ajustar a largura · dois cliques voltam ao padrão',
+    focusOn: 'foco', focusOff: 'mostrar todos os projetos de novo',
     connecting: 'conectando…', waiting: 'aguardando…',
     newMessages: '↓ novas mensagens',
     sessionId: 'ID da sessão', sessionIdCopy: 'ID da sessão · copiar',
@@ -1922,6 +2048,8 @@ const STRINGS = {
     followLive: 'follow the live session',
     showCommands: 'commands', showOutputs: 'output',
     hideList: 'hide list', showList: 'show list',
+    resizeRail: 'drag to set the width · double-click restores it',
+    focusOn: 'focus', focusOff: 'show every project again',
     connecting: 'connecting…', waiting: 'waiting…',
     newMessages: '↓ new messages',
     sessionId: 'session id', sessionIdCopy: 'session id · copy',
@@ -2668,6 +2796,8 @@ function drawTree() {
   visibleRows = [];
 
   for (const project of projects) {
+    if (!inFocus(project)) continue;
+
     const hits = project.sessions.filter((meta) => matches(project, meta, needle) && inScope(meta));
     if (!hits.length) continue;
 
@@ -2768,6 +2898,7 @@ function paintLang() {
   langPt.classList.toggle('on', lang === 'pt');
   langEn.classList.toggle('on', lang === 'en');
   paintAwake();
+  paintFocus();
   paintView();
 }
 
@@ -2885,15 +3016,63 @@ function setScope(next) {
   drawTree();
 }
 
+// Focus keeps one project on the list: the one the open session belongs to when
+// it is turned on, with every project in a folder under it, so a repository's
+// sub-apps stay. Nothing is filtered on the server; it is the list, not the data.
+function inFocus(project) {
+  if (!focusPath) return true;
+
+  const inside = project.path === focusPath || project.path.startsWith(focusPath + '/');
+  return inside;
+}
+
+function focusedProject() {
+  return projects.find((project) => project.path === focusPath) || null;
+}
+
+function paintFocus() {
+  focusChip.hidden = !focusPath;
+  if (!focusPath) return;
+
+  const project = focusedProject();
+  const name = project ? projectName(project) : shortPath(focusPath);
+  focusChip.innerHTML = '<span></span><span class="name"></span><span class="keys">cmd+A F</span>';
+  focusChip.firstChild.textContent = t('focusOn');
+  focusChip.querySelector('.name').textContent = name;
+}
+
+function setFocus(path) {
+  focusPath = path;
+  if (focusPath) localStorage.setItem('pergula:focus', focusPath);
+  if (!focusPath) localStorage.removeItem('pergula:focus');
+
+  paintFocus();
+  drawTree();
+}
+
+function toggleFocus() {
+  if (focusPath) {
+    setFocus('');
+    return;
+  }
+
+  const owner = session && projects.find((project) => project.slug === session.slug);
+  if (!owner) return;
+
+  setFocus(owner.path);
+}
+
 function drawTop() {
   if (view === 'library') {
     titleEl.textContent = t('tabLibrary');
+    titleEl.title = '';
     metaEl.textContent = shortPath(snippetsHome);
     return;
   }
 
   if (!session) {
     titleEl.textContent = t('noSession');
+    titleEl.title = '';
     sidEl.dataset.for = '';
     sidEl.textContent = t('sessionId');
     metaEl.textContent = '';
@@ -2901,6 +3080,7 @@ function drawTop() {
   }
 
   titleEl.textContent = session.title;
+  titleEl.title = session.title;
   if (sidEl.dataset.for !== session.id) {
     sidEl.dataset.for = session.id;
     sidEl.innerHTML = escapeHtml(t('sessionIdCopy')) + '<b></b>';
@@ -3497,16 +3677,41 @@ document.addEventListener('visibilitychange', () => {
 langPt.addEventListener('click', () => setLang('pt'));
 langEn.addEventListener('click', () => setLang('en'));
 
+focusChip.addEventListener('click', toggleFocus);
+
 scopeLive.addEventListener('click', () => setScope('live'));
 scopeAll.addEventListener('click', () => setScope('all'));
 
 // cmd/ctrl + 1..9 jumps to the Nth session on the list, in the order shown.
 // Both modifiers are bound: in a normal Chrome tab cmd+N belongs to the tab
 // strip, and only the --open window is free of it.
+// cmd+A then cmd+F, with the modifier held, turns focus on or off. A on its own
+// still selects everything; only an F that follows it within the second is taken.
+const CHORD_MS = 1000;
+let chordAt = 0;
+
 window.addEventListener('keydown', (event) => {
   const hasModifier = event.metaKey || event.ctrlKey;
   if (!hasModifier) return;
   if (event.altKey) return;
+
+  // Pressing cmd again between the two letters is not a key of its own here.
+  const onlyModifier = event.key === 'Meta' || event.key === 'Control';
+  if (onlyModifier) return;
+
+  if (event.key === 'a') {
+    chordAt = performance.now();
+    return;
+  }
+
+  const closesChord = event.key === 'f' && performance.now() - chordAt < CHORD_MS;
+  chordAt = 0;
+  if (closesChord) {
+    event.preventDefault();
+    window.getSelection().removeAllRanges();
+    toggleFocus();
+    return;
+  }
 
   if (event.key === 'b') {
     event.preventDefault();
@@ -3576,6 +3781,64 @@ function toggleRail() {
 
 railToggle.addEventListener('click', toggleRail);
 
+// The rail's width follows a drag on its right edge and is kept per browser.
+// Long project and session names on a wide screen are the reason it exists;
+// the clamp keeps the reading column from being squeezed out.
+const RAIL_MIN = 220;
+const RAIL_MAX = 720;
+
+function clampRail(width) {
+  const ceiling = Math.min(RAIL_MAX, Math.round(window.innerWidth * 0.6));
+  return Math.max(RAIL_MIN, Math.min(ceiling, Math.round(width)));
+}
+
+function setRailWidth(width) {
+  document.body.style.setProperty('--rail-width', clampRail(width) + 'px');
+}
+
+function onGripDown(event) {
+  if (event.button !== 0) return;
+
+  event.preventDefault();
+  railGrip.setPointerCapture(event.pointerId);
+  document.body.classList.add('resizing');
+}
+
+function onGripMove(event) {
+  if (!railGrip.hasPointerCapture(event.pointerId)) return;
+
+  setRailWidth(event.clientX);
+}
+
+function onGripUp(event) {
+  if (!railGrip.hasPointerCapture(event.pointerId)) return;
+
+  railGrip.releasePointerCapture(event.pointerId);
+  document.body.classList.remove('resizing');
+  localStorage.setItem('pergula:rail-width', String(rail.getBoundingClientRect().width));
+}
+
+function onGripReset() {
+  document.body.style.removeProperty('--rail-width');
+  localStorage.removeItem('pergula:rail-width');
+}
+
+// A width saved on a wide screen is re-clamped when the window narrows, so the
+// reading column keeps its share; widening again gives the saved width back.
+function restoreRailWidth() {
+  const saved = Number(localStorage.getItem('pergula:rail-width'));
+  if (saved) setRailWidth(saved);
+}
+
+restoreRailWidth();
+window.addEventListener('resize', restoreRailWidth);
+
+railGrip.addEventListener('pointerdown', onGripDown);
+railGrip.addEventListener('pointermove', onGripMove);
+railGrip.addEventListener('pointerup', onGripUp);
+railGrip.addEventListener('pointercancel', onGripUp);
+railGrip.addEventListener('dblclick', onGripReset);
+
 options.querySelector('.fold-head').addEventListener('click', () => toggleFold(options));
 
 // The session in a page of text, to paste into a new one: what it was, where
@@ -3644,12 +3907,50 @@ copyResume.addEventListener('click', () => {
 function onPick(id) {
   selectedId = id;
   follow.checked = false;
-  limit = 400;
+  limit = DEFAULT_LIMIT;
   rendered = [];
   stateToken = '';
   pinnedToBottom = true;
   drawTree();
+  paintPicked(id);
   schedulePoll(0);
+}
+
+// The last sessions read, as the server last sent them. Going back to one paints
+// it at once from here; the poll that follows sends its token and gets a 204, or
+// the few turns that arrived meanwhile.
+const PAINTED_LIMIT = 12;
+const painted = new Map();
+
+function remember(payload) {
+  const cacheable = limit === DEFAULT_LIMIT && payload.session;
+  if (!cacheable) return;
+
+  painted.delete(payload.session.id);
+  painted.set(payload.session.id, payload);
+  if (painted.size > PAINTED_LIMIT) painted.delete(painted.keys().next().value);
+}
+
+// A click answers in the same frame: the header takes the new session from the
+// index straight away, and the feed shows the cached turns or says it is loading.
+// Leaving the old conversation on screen under the new name read as a dead click.
+function paintPicked(id) {
+  const known = painted.get(id);
+  if (known) {
+    onState(known);
+    return;
+  }
+
+  session = projects.flatMap((project) => project.sessions).find((meta) => meta.id === id) || null;
+  resume = null;
+  messages = [];
+  total = 0;
+  drawTop();
+
+  const loading = document.createElement('div');
+  loading.className = 'empty';
+  loading.textContent = t('loading');
+  feed.replaceChildren(loading);
 }
 
 function onIndex(payload) {
@@ -3659,6 +3960,7 @@ function onIndex(payload) {
   activeId = payload.active;
   drawTree();
   drawAttention();
+  paintFocus();
 }
 
 function onState(payload) {
@@ -3690,6 +3992,7 @@ function onState(payload) {
 // time before the fetch even began. schedulePoll(0) serves it immediately.
 let pollTimer = null;
 let pollRun = 0;
+let pollAbort = null;
 
 function schedulePoll(delay) {
   clearTimeout(pollTimer);
@@ -3698,12 +4001,19 @@ function schedulePoll(delay) {
 
 async function pollState() {
   const run = ++pollRun;
+
+  // A request for the session just left is dropped, not waited on: the browser
+  // keeps six connections to a host, and stale ones queued the new one behind.
+  if (pollAbort) pollAbort.abort();
+  pollAbort = new AbortController();
+  const signal = pollAbort.signal;
+
   try {
     const target = follow.checked ? '' : (selectedId || '');
     const url = '/api/state?session=' + encodeURIComponent(target)
       + '&limit=' + limit
       + '&since=' + encodeURIComponent(stateToken);
-    const response = await fetch(url);
+    const response = await fetch(url, { signal });
 
     // A newer switch began while this response was in flight. Applying it now
     // would paint the old session over the one the person just chose.
@@ -3714,6 +4024,7 @@ async function pollState() {
       if (run !== pollRun) return;
       const changedSession = !session || !payload.session || session.id !== payload.session.id;
       onState(payload);
+      remember(payload);
       const following = follow.checked && payload.session;
       if (following) {
         selectedId = payload.session.id;
@@ -3802,7 +4113,10 @@ def install_agent(port: int) -> None:
         "ProgramArguments": [AGENT_PYTHON, str(script), "--serve", "--port", str(port)],
         "RunAtLoad": True,
         "KeepAlive": True,
-        "ProcessType": "Background",
+        # A person is waiting on every answer. Background meant the lowest
+        # priority and the efficiency cores only: with a few agents busy the
+        # system starved it, and a click took tens of seconds to come back.
+        "ProcessType": "Interactive",
         "StandardOutPath": str(AGENT_LOG),
         "StandardErrorPath": str(AGENT_LOG),
     }))

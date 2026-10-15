@@ -20,6 +20,7 @@ import json
 import os
 import re
 import tempfile
+import threading
 import time
 import unittest
 import unittest.mock
@@ -400,6 +401,69 @@ class Blocks(TempTranscript):
         self.path.write_text(record("good") + "{not json\n" + record("also good"))
         self.assertEqual([m["text"] for m in pergula.parse_transcript(self.path)],
                          ["good", "also good"])
+
+
+def compact(body):
+    """A line as the CLI really writes it: no space after the separators."""
+    return json.dumps(body, separators=(",", ":")) + "\n"
+
+
+class Shortcuts(TempTranscript):
+    """What the parser skips to stay fast. A mistake here deletes turns silently."""
+
+    def test_a_record_typed_up_front_and_not_shown_is_skipped(self):
+        self.path.write_text(
+            compact({"type": "api-request", "params": {"messages": [{"role": "user", "content": "no"}]}})
+            + compact({"type": "user", "message": {"role": "user", "content": "typed first"}})
+            + compact({"parentUuid": "x", "type": "assistant",
+                       "message": {"role": "assistant", "content": "typed later"}})
+        )
+        self.assertEqual(self.texts(), ["typed first", "typed later"])
+
+    def test_screenshots_are_emptied_and_the_turn_survives(self):
+        blob = "A" * pergula.BLOB_MIN
+        self.path.write_text(compact({
+            "parentUuid": "x", "type": "user",
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "content": [
+                    {"type": "text", "text": "shot taken"},
+                    {"type": "image", "source": {"type": "base64", "data": blob}},
+                ]},
+            ]},
+            "toolUseResult": {"file": {"base64": blob}},
+        }))
+        self.assertEqual(self.texts(), ["shot taken"])
+
+    def test_two_requests_for_one_cold_file_parse_it_once(self):
+        self.path.write_text(record("once"))
+        original = pergula.parse_lines
+        calls = []
+
+        def slow(lines, messages):
+            calls.append(1)
+            time.sleep(0.2)
+            original(lines, messages)
+
+        threads = [threading.Thread(target=pergula.parse_transcript, args=(self.path,)) for _ in range(3)]
+        with unittest.mock.patch.object(pergula, "parse_lines", slow):
+            for thread in threads:
+                thread.start()
+
+            for thread in threads:
+                thread.join()
+
+        self.assertEqual(len(calls), 1)
+
+    def test_cut_leaves_valid_json(self):
+        line = compact({"data": "A" * pergula.BLOB_MIN, "base64": "B" * 999, "keep": "C" * 999})
+        self.assertEqual(json.loads(pergula.drop_blobs(line.encode())),
+                         {"data": "", "base64": "", "keep": "C" * 999})
+
+    def test_short_values_and_quoted_keys_inside_text_are_kept(self):
+        quoted = '"data":"' + "A" * pergula.BLOB_MIN + '"'
+        line = compact({"data": "short", "text": quoted})
+        self.assertEqual(json.loads(pergula.drop_blobs(line.encode())),
+                         {"data": "short", "text": quoted})
 
 
 class AgentState(unittest.TestCase):
