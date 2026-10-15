@@ -499,6 +499,33 @@ class AgentState(unittest.TestCase):
 
         self.assertEqual(pergula.agent_state("abc-1", "idle"), "ready")
 
+    def write_behind(self, session, count, turn_over=True):
+        record = {"state": "working", "subagents": count, "turn_over": turn_over}
+        (Path(self.directory.name) / f"{session}.json").write_text(json.dumps(record))
+
+    def test_subagents_behind_a_finished_turn_keep_it_working(self):
+        self.write_behind("abc-1", 2)
+
+        self.assertEqual(pergula.agent_state("abc-1", "idle"), "working")
+        self.assertEqual(pergula.subagents_behind(pergula.agent_record("abc-1")), 2)
+
+    def test_a_count_left_from_a_turn_still_running_is_not_trusted(self):
+        self.write_behind("abc-1", 2, turn_over=False)
+
+        self.assertEqual(pergula.agent_state("abc-1", "idle"), "ready")
+        self.assertEqual(pergula.subagents_behind(pergula.agent_record("abc-1")), 0)
+
+    def test_a_count_that_is_not_a_number_is_none(self):
+        self.write_behind("abc-1", "2")
+
+        self.assertEqual(pergula.subagents_behind(pergula.agent_record("abc-1")), 0)
+
+    def test_a_change_in_the_count_changes_the_index_token(self):
+        two = {"abc-1": {"status": "idle", "state": "working", "subagents": 2}}
+        one = {"abc-1": {"status": "idle", "state": "working", "subagents": 1}}
+
+        self.assertNotEqual(pergula.live_stamp(two), pergula.live_stamp(one))
+
     def test_an_unknown_state_falls_back(self):
         self.write("abc-1", "dancing")
 

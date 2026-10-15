@@ -399,10 +399,12 @@ def live_sessions() -> dict:
             continue
 
         status = record.get("status") or ""
+        state = agent_state(session, status)
         live[session] = {
             "pid": pid,
             "status": status,
-            "state": agent_state(session, status),
+            "state": state,
+            "subagents": subagents_behind(agent_record(session)) if state == "working" else 0,
             "name": record.get("name") or "",
             "since": record.get("startedAt", 0) / 1000,
         }
@@ -410,25 +412,42 @@ def live_sessions() -> dict:
     return live
 
 
+def agent_record(session: str) -> dict:
+    """What the tab-status hooks wrote about a session, or nothing."""
+    # The id names a file, so it must not be able to name one anywhere else.
+    if not SESSION_ID.fullmatch(session):
+        return {}
+
+    try:
+        record = json.loads((AGENT_STATE_PATH / f"{session}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+    return record if isinstance(record, dict) else {}
+
+
+def subagents_behind(record: dict) -> int:
+    """Subagents still running after the main turn ended. The hooks read them
+    from the CLI's own list of background tasks, so a dead one is not counted."""
+    count = record.get("subagents")
+    counted = isinstance(count, int) and count > 0 and record.get("turn_over")
+    return count if counted else 0
+
+
 def agent_state(session: str, status: str) -> str:
     """working, needs_you, ready or error, for a session with a live process."""
     fallback = "working" if status == "busy" else "ready"
-
-    # The id names a file, so it must not be able to name one anywhere else.
-    if not SESSION_ID.fullmatch(session):
-        return fallback
-
-    try:
-        state = json.loads((AGENT_STATE_PATH / f"{session}.json").read_text(encoding="utf-8")).get("state")
-    except (OSError, ValueError, AttributeError):
-        return fallback
+    record = agent_record(session)
+    state = record.get("state")
 
     if state not in AGENT_STATES:
         return fallback
 
     # Esc ends a turn without firing the Stop hook, so the file can still say
-    # working long after the CLI went idle. The registry wins that one.
-    interrupted = state == "working" and status == "idle"
+    # working long after the CLI went idle. The registry wins that one — unless
+    # the turn ended on purpose and subagents are still at it in the background,
+    # which the registry cannot see either.
+    interrupted = state == "working" and status == "idle" and not subagents_behind(record)
     if interrupted:
         return "ready"
 
@@ -436,7 +455,10 @@ def agent_state(session: str, status: str) -> str:
 
 
 def live_stamp(live: dict) -> str:
-    return ",".join(f"{session}:{data['status']}:{data['state']}" for session, data in sorted(live.items()))
+    return ",".join(
+        f"{session}:{data['status']}:{data['state']}:{data.get('subagents', 0)}"
+        for session, data in sorted(live.items())
+    )
 
 
 def save_caffeine(until: float, pid: int) -> None:
@@ -741,6 +763,7 @@ def build_index(scope: Path | None) -> dict:
             "live": bool(running),
             "status": running["status"] if running else "",
             "state": running["state"] if running else "",
+            "subagents": running["subagents"] if running else 0,
             "pid": running["pid"] if running else 0,
         }
 
@@ -2017,6 +2040,7 @@ const STRINGS = {
     openInTerminal: 'aberta no terminal · pid {pid} · {status}',
     autoName: '(nome automático)',
     stateWorking: 'trabalhando', stateNeedsYou: 'precisa de você',
+    subagentOne: '1 subagente', subagentMany: '{n} subagentes',
     stateReady: 'pronto', stateError: 'erro',
     renameHint: 'renomear projeto (vazio volta ao caminho)',
     now: 'agora', month: 'mes',
@@ -2074,6 +2098,7 @@ const STRINGS = {
     openInTerminal: 'open in a terminal · pid {pid} · {status}',
     autoName: '(automatic name)',
     stateWorking: 'working', stateNeedsYou: 'needs you',
+    subagentOne: '1 agent', subagentMany: '{n} agents',
     stateReady: 'ready', stateError: 'error',
     renameHint: 'rename project (empty restores the path)',
     now: 'now', month: 'mo',
@@ -2695,6 +2720,19 @@ function drawAttention() {
   badging.catch(() => null);
 }
 
+// What sits where the time would: what the session is waiting on, or how many
+// subagents are still working once the main turn has ended, or how long ago.
+function whenLabel(meta) {
+  if (needsAttention(meta)) return stateLabel(meta.state);
+
+  const behind = meta.live && meta.subagents;
+  if (!behind) return ago(meta.mtime);
+
+  if (meta.subagents === 1) return t('subagentOne');
+
+  return t('subagentMany', { n: meta.subagents });
+}
+
 function buildSessionRow(meta, ordinal) {
   const row = document.createElement('button');
   row.type = 'button';
@@ -2728,7 +2766,7 @@ function buildSessionRow(meta, ordinal) {
 
   const when = document.createElement('span');
   when.className = 'when';
-  when.textContent = needsAttention(meta) ? stateLabel(meta.state) : ago(meta.mtime);
+  when.textContent = whenLabel(meta);
   if (meta.live) {
     const light = document.createElement('span');
     light.className = 'light';

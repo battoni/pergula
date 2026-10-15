@@ -115,6 +115,10 @@ the files the tab-status hooks write in `~/.claude/tab-status/sessions`, the
 same hooks that put the state in the terminal tab title. Without them the light
 falls back to the registry's two.
 
+A turn can end with subagents still running in the background. The row stays
+blue until the last one finishes, with their count where the time would be;
+shells left running, like a dev server, do not count.
+
 <img src="docs/states.svg" alt="An agent turns to needs you, the window title counts it, and a click takes you to it" width="760">
 
 Whatever you are reading stays on the list regardless, so it never vanishes under
