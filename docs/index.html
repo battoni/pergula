@@ -52,7 +52,7 @@
   .wrap { max-width: 1040px; margin: 0 auto; padding: 0 20px; }
 
   /* ---- hero ---- */
-  header.hero { padding: 72px 0 40px; text-align: center; }
+  header.hero { padding-block: 72px 40px; text-align: center; }
   .lockup { display: inline-flex; align-items: center; gap: 14px; color: var(--accent); }
   .lockup svg { width: 46px; height: 43px; fill: currentColor; }
   .lockup span { font-size: 44px; font-weight: 650; letter-spacing: -.02em; }
@@ -66,7 +66,8 @@
     margin: 30px auto 0; max-width: 760px;
   }
   .install pre {
-    flex: 1 1 520px; min-width: 0; margin: 0; padding: 14px 16px; overflow-x: auto;
+    flex: 1 1 520px; min-width: 0; margin: 0; padding: 14px 16px;
+    white-space: pre-wrap; overflow-wrap: anywhere;
     background: var(--code); border: 1px solid var(--line); border-radius: 12px;
     color: var(--heading); font: 13.5px/1.6 var(--mono); text-align: left;
   }
@@ -86,7 +87,7 @@
   .claims li::before { content: "●"; color: var(--accent); margin-right: 8px; font-size: 9px; vertical-align: 2px; }
 
   /* ---- live demo ---- */
-  section.try { padding: 24px 0 8px; }
+  section.try { padding-block: 24px 8px; }
   .try-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
   .try-head h2 { margin: 0; color: var(--heading); font-size: 22px; }
   .try-head p { margin: 0; color: var(--muted); font-size: 14px; }
@@ -223,7 +224,7 @@
   .keys { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 12px 0 0; padding: 0; list-style: none; color: var(--muted); font-size: 13.5px; }
 
   /* ---- features ---- */
-  section.features { padding: 56px 0 10px; }
+  section.features { padding-block: 56px 10px; }
   .feature { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 36px; align-items: center; padding: 34px 0; border-top: 1px solid var(--line); }
   .feature:nth-child(even) { grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); }
   .feature:nth-child(even) .copy { order: 2; }
@@ -232,16 +233,16 @@
   .feature p { margin: 0 0 10px; color: var(--body); }
   .feature img { display: block; width: 100%; height: auto; border-radius: 12px; }
 
-  section.not { padding: 40px 0; border-top: 1px solid var(--line); }
+  section.not { padding-block: 40px; border-top: 1px solid var(--line); }
   section.not h2 { margin: 0 0 18px; color: var(--heading); font-size: 22px; }
   .not ul { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin: 0; padding: 0; list-style: none; }
   .not li { padding: 14px 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; color: var(--muted); font-size: 14.5px; }
   .not li b { display: block; color: var(--heading); margin-bottom: 4px; }
 
-  footer { padding: 34px 0 60px; border-top: 1px solid var(--line); color: var(--subtle); font-size: 14px; text-align: center; }
+  footer { padding-block: 34px 60px; border-top: 1px solid var(--line); color: var(--subtle); font-size: 14px; text-align: center; }
 
   @media (max-width: 760px) {
-    header.hero { padding-top: 44px; }
+    header.hero { padding-block-start: 44px; }
     .demo { height: 520px; }
     .demo .body { grid-template-columns: minmax(0, 1fr); grid-template-rows: 200px minmax(0, 1fr); }
     .demo .rail { border-right: 0; border-bottom: 1px solid var(--line); }
@@ -268,7 +269,8 @@
   <p class="lede">The terminal hard-wraps Claude's prose, so it pastes into your email in pieces. pergula serves the same transcripts on <code>127.0.0.1</code>, where text selects like text — and every open agent is one glance away.</p>
 
   <div class="install">
-    <pre id="installCmd"><span class="dim">$</span> curl -fsSLO https://raw.githubusercontent.com/battoni/pergula/main/pergula
+    <pre id="installCmd"><span class="dim">$</span> curl -fsSLO \
+    https://raw.githubusercontent.com/battoni/pergula/main/pergula
 <span class="dim">$</span> chmod +x pergula &amp;&amp; ./pergula --install</pre>
     <button class="copy" id="copyInstall" type="button">copy</button>
     <a class="cta" href="https://github.com/battoni/pergula">GitHub</a>
