@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 460" width="760" height="460" role="img" aria-labelledby="title desc">
+  <title id="title">Keeping the Mac awake from pergula</title>
+  <desc id="desc">keep awake, then a number of hours: the Mac holds off sleep and the agents finish while you are away.</desc>
+
+  <!-- Colours are the :root tokens in pergula. The projects and sessions are made up. -->
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .ripple { transform-box: fill-box; transform-origin: center; }
+
+    .park { animation: park 10s step-end infinite; }
+    .hrs { animation: hrs 10s ease-in-out infinite; }
+    .aw0 { animation: aw0 10s step-end infinite; }
+    .aw1 { animation: aw1 10s step-end infinite; }
+    .aw2 { animation: aw2 10s step-end infinite; }
+    .pill { animation: pill 10s ease-in-out infinite; }
+    .st0 { animation: st0 10s ease-in-out infinite; }
+    .st1 { animation: st1 10s ease-in-out infinite; }
+    .st2 { animation: st2 10s ease-in-out infinite; }
+    .cursor { animation: cur 10s ease-in-out infinite; }
+    .rp { animation: rp 10s ease-out infinite; }
+    .rq { animation: rq 10s ease-out infinite; }
+    @keyframes park { 0% { opacity: 1; } 33% { opacity: 0; } 96% { opacity: 1; } }
+    @keyframes hrs { 0%, 17% { opacity: 0; } 19%, 32% { opacity: 1; } 33%, 100% { opacity: 0; } }
+    @keyframes aw0 { 0% { opacity: 0; } 33% { opacity: 1; } 55% { opacity: 0; } }
+    @keyframes aw1 { 0% { opacity: 0; } 55% { opacity: 1; } 75% { opacity: 0; } }
+    @keyframes aw2 { 0% { opacity: 0; } 75% { opacity: 1; } 96% { opacity: 0; } }
+    @keyframes pill { 0%, 33% { opacity: 0; } 36%, 93% { opacity: 1; } 96%, 100% { opacity: 0; } }
+    @keyframes cur { 0%, 3% { opacity: 0; transform: translate(560px, 300px); } 6% { opacity: 1; transform: translate(560px, 300px); } 14%, 17% { opacity: 1; transform: translate(120px, 350px); } 16% { transform: translate(120px, 350px) scale(.9); } 26%, 32% { opacity: 1; transform: translate(92px, 384px); } 31% { transform: translate(92px, 384px) scale(.9); } 40% { opacity: 1; transform: translate(92px, 384px); } 44%, 100% { opacity: 0; transform: translate(92px, 384px); } }
+    @keyframes rp { 0%, 16% { opacity: 0; transform: scale(.2); } 17% { opacity: .55; transform: scale(.4); } 24%, 100% { opacity: 0; transform: scale(1.6); } }
+    @keyframes rq { 0%, 31% { opacity: 0; transform: scale(.2); } 32% { opacity: .55; transform: scale(.4); } 39%, 100% { opacity: 0; transform: scale(1.6); } }
+    @keyframes st0 { 0%, 44% { opacity: 0; transform: translateY(8px); } 47%, 94% { opacity: 1; transform: translateY(0); } 97%, 100% { opacity: 0; transform: translateY(0); } }
+    @keyframes st1 { 0%, 58% { opacity: 0; transform: translateY(8px); } 61%, 94% { opacity: 1; transform: translateY(0); } 97%, 100% { opacity: 0; transform: translateY(0); } }
+    @keyframes st2 { 0%, 72% { opacity: 0; transform: translateY(8px); } 75%, 94% { opacity: 1; transform: translateY(0); } 97%, 100% { opacity: 0; transform: translateY(0); } }
+    /* Without motion, the frame that shows the feature. */
+    @media (prefers-reduced-motion: reduce) {
+      .park, .hrs, .aw0, .aw1, .aw2, .pill, .st0, .st1, .st2, .cursor, .rp, .rq { animation: none; }
+      .park, .hrs, .aw0, .aw2, .cursor, .rp, .rq { opacity: 0; }
+    }
+  </style>
+
+  <defs>
+    <clipPath id="window"><rect width="760" height="460" rx="12"/></clipPath>
+    <clipPath id="rail"><rect x="0" y="28" width="240" height="432"/></clipPath>
+    <clipPath id="pane"><rect x="241" y="29" width="519" height="431"/></clipPath>
+  </defs>
+
+  <g clip-path="url(#window)">
+    <rect width="760" height="460" fill="#14120f"/>
+
+    <rect width="760" height="28" fill="#191614"/>
+    <circle cx="16" cy="14" r="5" fill="#ec6a5e"/>
+    <circle cx="32" cy="14" r="5" fill="#f4bf4f"/>
+    <circle cx="48" cy="14" r="5" fill="#61c554"/>
+    <text x="380" y="18" font-size="11" fill="#6f665e" text-anchor="middle">pergula</text><g class="pill"><rect x="604" y="6" width="142" height="17" rx="8.5" fill="#2a3210" stroke="#c0e021"/><text x="675" y="18" font-size="10.5" fill="#f2ece4" text-anchor="middle">☾  sleep held off</text></g>
+    <line x1="0" y1="28.5" x2="760" y2="28.5" stroke="#322c28"/>
+
+    <rect x="0" y="29" width="240" height="431" fill="#191614"/>
+    <line x1="240.5" y1="29" x2="240.5" y2="460" stroke="#322c28"/>
+    <g transform="translate(20 46) scale(.05)" fill="#c0e021">
+      <path d="M32 32 L480 32 L480 128 L32 128 Z"/>
+      <path d="M32 192 L288 192 L352 288 L32 288 Z"/>
+      <path d="M288 352 L480 352 L480 448 L352 448 Z"/>
+    </g>
+    <text x="50" y="65" font-size="19" fill="#c0e021" font-weight="600">pergula</text>
+
+    <rect x="16.5" y="88.5" width="207" height="30" rx="8" fill="#12100e" stroke="#322c28"/>
+    <text x="28" y="108" font-size="11.5" fill="#6f665e">filter project or session</text>
+<text x="20" y="150" font-size="11" fill="#f2ece4" font-weight="700">ORCHARD</text><text x="220" y="150" font-size="10.5" fill="#6f665e" text-anchor="end">1</text><rect x="10" y="157" width="220" height="22" rx="6" fill="#232020"/><rect x="10" y="157" width="2.5" height="22" fill="#c0e021"/><circle cx="30" cy="168" r="3.5" fill="#6fa8d6"/><text x="42" y="172" font-size="12" fill="#f2ece4">Checkout tax rules</text><text x="220" y="172" font-size="10.5" fill="#6f665e" text-anchor="end">now</text><text x="20" y="202" font-size="11" fill="#f2ece4" font-weight="700">LEDGER</text><text x="220" y="202" font-size="10.5" fill="#6f665e" text-anchor="end">1</text><circle cx="30" cy="220" r="3.5" fill="#6fa8d6"/><text x="42" y="224" font-size="12" fill="#ddd5cb">March imports</text><text x="220" y="224" font-size="10.5" fill="#6f665e" text-anchor="end">4m</text><line x1="0" y1="326.5" x2="240" y2="326.5" stroke="#322c28"/><g class="park"><rect x="16.5" y="336.5" width="207" height="28" rx="8" fill="none" stroke="#322c28"/><text x="120" y="354.5" font-size="11.5" fill="#9b8f84" text-anchor="middle">keep awake</text></g><g class="aw0"><rect x="16.5" y="336.5" width="207" height="28" rx="8" fill="#2a3210" stroke="#c0e021"/><text x="120" y="354.5" font-size="11.5" fill="#f2ece4" text-anchor="middle">awake · 2:00</text></g><g class="aw1"><rect x="16.5" y="336.5" width="207" height="28" rx="8" fill="#2a3210" stroke="#c0e021"/><text x="120" y="354.5" font-size="11.5" fill="#f2ece4" text-anchor="middle">awake · 1:59</text></g><g class="aw2"><rect x="16.5" y="336.5" width="207" height="28" rx="8" fill="#2a3210" stroke="#c0e021"/><text x="120" y="354.5" font-size="11.5" fill="#f2ece4" text-anchor="middle">awake · 1:58</text></g><g class="hrs"><rect x="16.5" y="370.5" width="47" height="26" rx="7" fill="none" stroke="#322c28"/><text x="40.0" y="388" font-size="11.5" fill="#ddd5cb" text-anchor="middle">1h</text><rect x="69.0" y="370.5" width="47" height="26" rx="7" fill="none" stroke="#322c28"/><text x="92.5" y="388" font-size="11.5" fill="#ddd5cb" text-anchor="middle">2h</text><rect x="121.5" y="370.5" width="47" height="26" rx="7" fill="none" stroke="#322c28"/><text x="145.0" y="388" font-size="11.5" fill="#ddd5cb" text-anchor="middle">4h</text><rect x="174.0" y="370.5" width="47" height="26" rx="7" fill="none" stroke="#322c28"/><text x="197.5" y="388" font-size="11.5" fill="#ddd5cb" text-anchor="middle">8h</text></g><rect x="16.5" y="420.5" width="102" height="24" rx="8" fill="none" stroke="#322c28"/><text x="67.5" y="437" font-size="11.5" fill="#9b8f84" text-anchor="middle">português</text><rect x="121.5" y="420.5" width="102" height="24" rx="8" fill="#2a3210" stroke="#c0e021"/><text x="172.5" y="437" font-size="11.5" fill="#f2ece4" text-anchor="middle">english</text>
+    <rect x="241" y="29" width="519" height="58" fill="#191614"/>
+    <line x1="241" y1="87.5" x2="760" y2="87.5" stroke="#322c28"/>
+    <circle cx="266" cy="51" r="5" fill="#c0e021"/>
+    <text x="280" y="56" font-size="14" fill="#f2ece4" font-weight="600">Wire checkout to the tax rules</text>
+    <text x="280" y="76" font-size="11.5" fill="#6f665e">~/Work/orchard · main</text>
+    
+<text x="274" y="106" font-size="10.5" fill="#6fa8d6" font-weight="700" letter-spacing=".08em">YOU</text><rect x="274" y="116" width="452" height="60" rx="10" fill="#171d24" stroke="#322c28"/><rect x="274" y="116" width="3" height="60" fill="#6fa8d6"/><text x="294" y="139" font-size="13" fill="#ddd5cb">The tax table changed on the first. Make checkout</text><text x="294" y="158" font-size="13" fill="#ddd5cb">read the new rates and keep the old ones for refunds.</text><g class="st0"><text x="274" y="196" font-size="10.5" fill="#85b06b" font-weight="700" letter-spacing=".08em">COMMAND</text><rect x="274" y="206" width="452" height="41" rx="10" fill="#171c16" stroke="#322c28"/><rect x="274" y="206" width="3" height="41" fill="#85b06b"/><text x="294" y="229" font-size="11.5" fill="#ddd5cb" class="mono">npm test  ·  212 passed</text></g><g class="st1"><text x="274" y="277" font-size="10.5" fill="#85b06b" font-weight="700" letter-spacing=".08em">COMMAND</text><rect x="274" y="287" width="452" height="41" rx="10" fill="#171c16" stroke="#322c28"/><rect x="274" y="287" width="3" height="41" fill="#85b06b"/><text x="294" y="310" font-size="11.5" fill="#ddd5cb" class="mono">git commit -m "checkout: dated tax rates"</text></g><g class="st2"><text x="274" y="358" font-size="10.5" fill="#d97757" font-weight="700" letter-spacing=".08em">CLAUDE</text><rect x="274" y="368" width="452" height="41" rx="10" fill="#1f1a17" stroke="#322c28"/><rect x="274" y="368" width="3" height="41" fill="#d97757"/><text x="294" y="391" font-size="13" fill="#ddd5cb">All three steps done, and the branch is pushed.</text></g><circle class="ripple rp" cx="120" cy="350" r="22" fill="#c0e021"/><circle class="ripple rq" cx="92.5" cy="383" r="22" fill="#c0e021"/><g class="cursor"><path d="M0 0 L0 17 L4.5 13 L7.5 20 L10.5 18.8 L7.6 12 L13 12 Z" fill="#f2ece4" stroke="#14120f" stroke-width="1.2" stroke-linejoin="round"/></g>  </g>
+
+  <rect x=".5" y=".5" width="759" height="459" rx="12" fill="none" stroke="#322c28"/>
+</svg>

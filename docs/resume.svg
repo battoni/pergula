@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 460" width="760" height="460" role="img" aria-labelledby="title desc">
+  <title id="title">Resuming a session in pergula</title>
+  <desc id="desc">The arrow beside the session id copies a prompt with the end of the conversation, to carry on in a fresh session without paying for the old context.</desc>
+
+  <!-- Colours are the :root tokens in pergula. The projects and sessions are made up. -->
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .ripple { transform-box: fill-box; transform-origin: center; }
+
+    .hov { animation: hov 10s ease-in-out infinite; }
+    .tipa { animation: tipa 10s step-end infinite; }
+    .tipb { animation: tipb 10s step-end infinite; }
+    .on { animation: on 10s step-end infinite; }
+    .term { animation: term 10s ease-in-out infinite; }
+    .cursor { animation: cur 10s ease-in-out infinite; }
+    .rp { animation: rp 10s ease-out infinite; }
+    .l0 { animation: l0 10s step-end infinite; }
+    .l1 { animation: l1 10s step-end infinite; }
+    .l2 { animation: l2 10s step-end infinite; }
+    .l3 { animation: l3 10s step-end infinite; }
+    .l4 { animation: l4 10s step-end infinite; }
+    .l5 { animation: l5 10s step-end infinite; }
+    .l6 { animation: l6 10s step-end infinite; }
+    @keyframes hov { 0%, 15% { opacity: 0; } 17%, 46% { opacity: 1; } 48%, 100% { opacity: 0; } }
+    @keyframes tipa { 0% { opacity: 0; } 17% { opacity: 1; } 30% { opacity: 0; } }
+    @keyframes tipb { 0% { opacity: 0; } 30% { opacity: 1; } 46% { opacity: 0; } }
+    @keyframes on { 0% { opacity: 0; } 30% { opacity: 1; } 92% { opacity: 0; } }
+    @keyframes term { 0%, 48% { opacity: 0; transform: translateY(40px); } 53%, 90% { opacity: 1; transform: translateY(0); } 94%, 100% { opacity: 0; transform: translateY(0); } }
+    @keyframes cur { 0%, 4% { opacity: 0; transform: translate(620px, 330px); } 7% { opacity: 1; transform: translate(620px, 330px); } 16%, 31% { opacity: 1; transform: translate(536px, 52px); } 29.5% { transform: translate(536px, 52px) scale(.9); } 44% { opacity: 1; transform: translate(536px, 52px); } 48%, 100% { opacity: 0; transform: translate(536px, 52px); } }
+    @keyframes rp { 0%, 29% { opacity: 0; transform: scale(.2); } 30% { opacity: .55; transform: scale(.4); } 37%, 100% { opacity: 0; transform: scale(1.6); } }
+    @keyframes l0 { 0% { opacity: 0; } 56% { opacity: 1; } 94% { opacity: 0; } }
+    @keyframes l1 { 0% { opacity: 0; } 60% { opacity: 1; } 94% { opacity: 0; } }
+    @keyframes l2 { 0% { opacity: 0; } 61% { opacity: 1; } 94% { opacity: 0; } }
+    @keyframes l3 { 0% { opacity: 0; } 62% { opacity: 1; } 94% { opacity: 0; } }
+    @keyframes l4 { 0% { opacity: 0; } 66% { opacity: 1; } 94% { opacity: 0; } }
+    @keyframes l5 { 0% { opacity: 0; } 67% { opacity: 1; } 94% { opacity: 0; } }
+    @keyframes l6 { 0% { opacity: 0; } 68% { opacity: 1; } 94% { opacity: 0; } }
+    /* Without motion, the frame that shows the feature. */
+    @media (prefers-reduced-motion: reduce) {
+      .hov, .tipa, .tipb, .on, .term, .cursor, .rp, .l0, .l1, .l2, .l3, .l4, .l5, .l6 { animation: none; }
+      .hov, .tipa, .tipb, .cursor, .rp { opacity: 0; }
+    }
+  </style>
+
+  <defs>
+    <clipPath id="window"><rect width="760" height="460" rx="12"/></clipPath>
+    <clipPath id="rail"><rect x="0" y="28" width="240" height="432"/></clipPath>
+    <clipPath id="pane"><rect x="241" y="29" width="519" height="431"/></clipPath>
+  </defs>
+
+  <g clip-path="url(#window)">
+    <rect width="760" height="460" fill="#14120f"/>
+
+    <rect width="760" height="28" fill="#191614"/>
+    <circle cx="16" cy="14" r="5" fill="#ec6a5e"/>
+    <circle cx="32" cy="14" r="5" fill="#f4bf4f"/>
+    <circle cx="48" cy="14" r="5" fill="#61c554"/>
+    <text x="380" y="18" font-size="11" fill="#6f665e" text-anchor="middle">pergula</text>
+    <line x1="0" y1="28.5" x2="760" y2="28.5" stroke="#322c28"/>
+
+    <rect x="0" y="29" width="240" height="431" fill="#191614"/>
+    <line x1="240.5" y1="29" x2="240.5" y2="460" stroke="#322c28"/>
+    <g transform="translate(20 46) scale(.05)" fill="#c0e021">
+      <path d="M32 32 L480 32 L480 128 L32 128 Z"/>
+      <path d="M32 192 L288 192 L352 288 L32 288 Z"/>
+      <path d="M288 352 L480 352 L480 448 L352 448 Z"/>
+    </g>
+    <text x="50" y="65" font-size="19" fill="#c0e021" font-weight="600">pergula</text>
+
+    <rect x="16.5" y="88.5" width="207" height="30" rx="8" fill="#12100e" stroke="#322c28"/>
+    <text x="28" y="108" font-size="11.5" fill="#6f665e">filter project or session</text>
+<rect x="10" y="261" width="220" height="22" rx="6" fill="#232020"/><rect x="10" y="261" width="2.5" height="22" fill="#c0e021"/><text x="20" y="150" font-size="11" fill="#f2ece4" font-weight="700">LEDGER</text><text x="220" y="150" font-size="10.5" fill="#6f665e" text-anchor="end">1</text><circle cx="30" cy="168" r="3.5" fill="#85b06b"/><text x="42" y="172" font-size="12" fill="#ddd5cb">Reconcile the March imports</text><text x="20" y="202" font-size="11" fill="#f2ece4" font-weight="700">atlas-api</text><text x="220" y="202" font-size="10.5" fill="#6f665e" text-anchor="end">1</text><circle cx="30" cy="220" r="3.5" fill="#f0a03c"/><text x="42" y="224" font-size="12" fill="#ddd5cb">Rate limits on the public routes</text><text x="20" y="254" font-size="11" fill="#f2ece4" font-weight="700">ORCHARD</text><text x="220" y="254" font-size="10.5" fill="#6f665e" text-anchor="end">3</text><circle cx="30" cy="272" r="3.5" fill="#6fa8d6"/><text x="42" y="276" font-size="12" fill="#ddd5cb">Wire checkout to the tax rules</text><circle cx="30" cy="294" r="3.5" fill="#85b06b"/><text x="42" y="298" font-size="12" fill="#ddd5cb">Seed the spring catalogue</text><text x="42" y="320" font-size="12" fill="#9b8f84">Review: supplier onboarding</text><text x="20" y="350" font-size="11" fill="#f2ece4" font-weight="700">BRIGHTSIDE</text><text x="220" y="350" font-size="10.5" fill="#6f665e" text-anchor="end">1</text><circle cx="30" cy="368" r="3.5" fill="#6fa8d6"/><text x="42" y="372" font-size="12" fill="#ddd5cb">Landing page copy, second pass</text><text x="20" y="402" font-size="11" fill="#f2ece4" font-weight="700">pergula</text><text x="220" y="402" font-size="10.5" fill="#6f665e" text-anchor="end">1</text><circle cx="30" cy="420" r="3.5" fill="#85b06b"/><text x="42" y="424" font-size="12" fill="#ddd5cb">Two-line header for portrait</text>
+    <rect x="241" y="29" width="519" height="58" fill="#191614"/>
+    <line x1="241" y1="87.5" x2="760" y2="87.5" stroke="#322c28"/>
+    <circle cx="266" cy="51" r="5" fill="#c0e021"/>
+    <text x="280" y="56" font-size="14" fill="#f2ece4" font-weight="600">Wire checkout to the tax rules</text>
+    <text x="280" y="76" font-size="11.5" fill="#6f665e">~/Work/orchard · main</text>
+    <g transform="translate(497 39) scale(.75)" fill="none" stroke="#9b8f84" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M15 6.5V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h.5"/></g><rect class="hov" x="521.5" y="37.5" width="28" height="28" rx="7" fill="#232020" stroke="#322c28"/><g transform="translate(527 39) scale(.75)" fill="none" stroke="#9b8f84" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5v6a3 3 0 0 0 3 3h11"/><path d="M15 10l4 4-4 4"/></g><g class="on"><g transform="translate(527 39) scale(.75)" fill="none" stroke="#c0e021" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5v6a3 3 0 0 0 3 3h11"/><path d="M15 10l4 4-4 4"/></g></g>
+<text x="274" y="106" font-size="10.5" fill="#6fa8d6" font-weight="700" letter-spacing=".08em">YOU</text><rect x="274" y="116" width="452" height="60" rx="10" fill="#171d24" stroke="#322c28"/><rect x="274" y="116" width="3" height="60" fill="#6fa8d6"/><text x="294" y="139" font-size="13" fill="#ddd5cb">The tax table changed on the first. Make checkout</text><text x="294" y="158" font-size="13" fill="#ddd5cb">read the new rates and keep the old ones for refunds.</text><text x="274" y="206" font-size="10.5" fill="#d97757" font-weight="700" letter-spacing=".08em">CLAUDE</text><rect x="274" y="216" width="452" height="94" rx="10" fill="#1f1a17" stroke="#322c28"/><rect x="274" y="216" width="3" height="94" fill="#d97757"/><text x="294" y="239" font-size="13" fill="#ddd5cb">Done. Rates now come from the dated table, so a</text><text x="294" y="258" font-size="13" fill="#ddd5cb">refund uses the rate of the day it was paid.</text><rect x="294" y="270" width="250" height="26" rx="6" fill="#12100e" stroke="#322c28"/><text x="304" y="287" font-size="11.5" fill="#ddd5cb" class="mono">checkout/tax.py  +48 −12</text><text x="274" y="340" font-size="10.5" fill="#85b06b" font-weight="700" letter-spacing=".08em">COMMAND</text><rect x="274" y="350" width="452" height="41" rx="10" fill="#171c16" stroke="#322c28"/><rect x="274" y="350" width="3" height="41" fill="#85b06b"/><text x="294" y="373" font-size="11.5" fill="#ddd5cb" class="mono">make test  ·  212 passed</text><g class="tipa"><rect x="494.5" y="72.5" width="242" height="28" rx="7" fill="#1c1917" stroke="#322c28"/><text x="504.5" y="91" font-size="11.5" fill="#ddd5cb">resume in a new session · copy prompt</text></g><g class="tipb"><rect x="521.5" y="72.5" width="96" height="28" rx="7" fill="#1c1917" stroke="#322c28"/><text x="531.5" y="91" font-size="11.5" fill="#ddd5cb">prompt copied</text></g><g class="term">
+      <rect x="262.5" y="214.5" width="478" height="232" rx="10" fill="#0c0b0a" stroke="#322c28"/>
+      <circle cx="280" cy="232" r="4.5" fill="#ec6a5e"/><circle cx="294" cy="232" r="4.5" fill="#f4bf4f"/><circle cx="308" cy="232" r="4.5" fill="#61c554"/>
+      <text x="501" y="236" font-size="10.5" fill="#6f665e" text-anchor="middle">zsh — ~/Work/orchard</text>
+      <line x1="263" y1="246.5" x2="740" y2="246.5" stroke="#322c28"/>
+<g class="l0"><text x="278" y="270" font-size="11.5" fill="#c0e021" class="mono" xml:space="preserve">$ cc orchard</text></g><g class="l1"><text x="278" y="300" font-size="11.5" fill="#ddd5cb" class="mono" xml:space="preserve">&gt; I am picking up here the work of an earlier Claude Code</text></g><g class="l2"><text x="278" y="324" font-size="11.5" fill="#ddd5cb" class="mono" xml:space="preserve">  session. Reopening that one would pay for its whole</text></g><g class="l3"><text x="278" y="348" font-size="11.5" fill="#ddd5cb" class="mono" xml:space="preserve">  context again, so below is only the end of it.</text></g><g class="l4"><text x="278" y="372" font-size="11.5" fill="#9b8f84" class="mono" xml:space="preserve">  Session: Wire checkout to the tax rules</text></g><g class="l5"><text x="278" y="396" font-size="11.5" fill="#9b8f84" class="mono" xml:space="preserve">  Last messages, without commands or their output</text></g><g class="l6"><text x="278" y="420" font-size="11.5" fill="#9b8f84" class="mono" xml:space="preserve">  YOU: The tax table changed on the first…</text></g></g><circle class="ripple rp" cx="535" cy="51" r="22" fill="#c0e021"/><g class="cursor"><path d="M0 0 L0 17 L4.5 13 L7.5 20 L10.5 18.8 L7.6 12 L13 12 Z" fill="#f2ece4" stroke="#14120f" stroke-width="1.2" stroke-linejoin="round"/></g>  </g>
+
+  <rect x=".5" y=".5" width="759" height="459" rx="12" fill="none" stroke="#322c28"/>
+</svg>

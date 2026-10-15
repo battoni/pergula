@@ -45,6 +45,11 @@ Default port is `7373`.
 
 ## Keyboard
 
+Moving between sessions takes no time: a click, or `cmd` and the row's number.
+The last few you read are painted from memory while the server confirms them.
+
+<img src="docs/switch.svg" alt="A click on another session, then cmd+6 and cmd+3: the transcript changes in the same moment" width="760">
+
 | | |
 | --- | --- |
 | `cmd/ctrl + K` | open the snippet palette, from anywhere |
@@ -89,6 +94,8 @@ commands and their output, which is where the size of a transcript goes. Paste i
 into a fresh `claude` and it starts from a page of text rather than from
 everything.
 
+<img src="docs/resume.svg" alt="The arrow beside the session id copies a resume prompt, pasted into a new session in the terminal" width="760">
+
 ## What it shows
 
 A sidebar groups every session by project. Sessions carry the name and the colour
@@ -105,6 +112,8 @@ installed app. The registry only knows busy and idle; the other two come from
 the files the tab-status hooks write in `~/.claude/tab-status/sessions`, the
 same hooks that put the state in the terminal tab title. Without them the light
 falls back to the registry's two.
+
+<img src="docs/states.svg" alt="An agent turns to needs you, the window title counts it, and a click takes you to it" width="760">
 
 Whatever you are reading stays on the list regardless, so it never vanishes under
 you mid-sentence. The page never scrolls itself while text is selected.
@@ -127,6 +136,8 @@ The prompts you send every day are not worth a skill and are tiring to retype.
 The **library** tab keeps them, and `cmd+K` puts one on the clipboard from
 anywhere in the app — type a few letters, press enter, paste. No pointer
 involved, no view change, no leaving the transcript you were reading.
+
+<img src="docs/palette.svg" alt="cmd+K, three letters and enter put a snippet on the clipboard" width="760">
 
 The prompts worth keeping are usually already in a transcript, so every turn of
 your own carries a `keep` button on hover: it promotes that message into the
@@ -167,6 +178,8 @@ An agent left working stops when the machine sleeps, which is a poor way to find
 out that it was never finished. The button at the bottom of the sidebar holds
 sleep off for one, two, four or eight hours, and shows what is left of that time
 while it does.
+
+<img src="docs/awake.svg" alt="keep awake, two hours: the countdown runs in the sidebar while the agent finishes its work" width="760">
 
 It is `caffeinate -disu -t` and nothing more — the tool that ships with macOS.
 The `-i` is the one that matters: it holds off the idle sleep that would stop the
