@@ -190,7 +190,7 @@ class StateToken(TempTranscript):
         self.assertEqual(pergula._MESSAGE_CACHE, {})
 
 
-class Windowing(TempTranscript):
+class TempProject(TempTranscript):
     """build_state resolves a session through PROJECTS, so point that at a
     temporary tree rather than the real ~/.claude."""
 
@@ -204,6 +204,10 @@ class Windowing(TempTranscript):
 
     def tearDown(self):
         pergula.PROJECTS = self.original_projects
+
+
+class Windowing(TempProject):
+    """A long session reaches the page as its tail, and says how long it is."""
 
     def test_sends_the_tail_and_reports_the_whole(self):
         self.path.write_text("".join(record(f"m{i}") for i in range(50)))
@@ -230,6 +234,98 @@ class Windowing(TempTranscript):
 
         state = pergula.build_state(None, None, 400)
         self.assertEqual(state["messages"][0]["text"], "new")
+
+
+class Resume(TempProject):
+    """The prompt that restarts a session is built from these turns. Too much in
+    them and the new session costs what the old one would have; a command's
+    output slipping through is how that happens."""
+
+    def test_keeps_only_what_was_said(self):
+        self.path.write_text(record("ask") + json.dumps({
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}},
+                {"type": "text", "text": "answer"},
+            ]},
+        }) + "\n")
+        turns = pergula.resume_turns(pergula.parse_transcript(self.path))
+
+        self.assertEqual(turns, [
+            {"role": "user", "text": "ask"},
+            {"role": "assistant", "text": "answer"},
+        ])
+
+    def test_only_the_last_turns_in_the_order_they_happened(self):
+        self.path.write_text("".join(
+            record(f"m{i}", role="user" if i % 2 == 0 else "assistant") for i in range(20)
+        ))
+        turns = pergula.resume_turns(pergula.parse_transcript(self.path))
+
+        self.assertEqual(len(turns), pergula.RESUME_TURNS)
+        self.assertEqual(turns[-1]["text"], "m19")
+        self.assertEqual(turns[0]["text"], f"m{20 - pergula.RESUME_TURNS}")
+
+    def test_narration_between_commands_does_not_push_the_request_out(self):
+        narration = "".join(record(f"step {i}", role="assistant") for i in range(10))
+        self.path.write_text(record("the request") + narration)
+        turns = pergula.resume_turns(pergula.parse_transcript(self.path))
+
+        self.assertEqual(turns, [
+            {"role": "user", "text": "the request"},
+            {"role": "assistant", "text": "step 9"},
+        ])
+
+    def test_two_messages_in_a_row_from_the_user_are_both_kept(self):
+        self.path.write_text(record("first") + record("second"))
+        turns = pergula.resume_turns(pergula.parse_transcript(self.path))
+
+        self.assertEqual(turns, [{"role": "user", "text": "first\n\nsecond"}])
+
+    def test_what_the_cli_injected_is_not_something_the_user_said(self):
+        self.path.write_text(record("typed") + record("# A skill body", isMeta=True))
+        turns = pergula.resume_turns(pergula.parse_transcript(self.path))
+
+        self.assertEqual(turns, [{"role": "user", "text": "typed"}])
+
+    def test_a_session_of_commands_alone_has_no_turns(self):
+        self.path.write_text(json.dumps({
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}},
+            ]},
+        }) + "\n")
+        state = pergula.build_state(None, self.path.stem, 400)
+
+        self.assertEqual(state["resume"]["turns"], [])
+
+    def test_a_long_message_keeps_its_head_and_its_tail(self):
+        clipped = pergula.clip_middle("start " + "x" * 5000 + " finish")
+
+        self.assertTrue(clipped.startswith("start "))
+        self.assertTrue(clipped.endswith(" finish"))
+        self.assertLess(len(clipped), pergula.RESUME_CLIP + 10)
+
+    def test_a_short_message_is_left_alone(self):
+        self.assertEqual(pergula.clip_middle("short"), "short")
+
+    def test_the_state_says_where_the_transcript_is(self):
+        self.path.write_text(record("hello"))
+        state = pergula.build_state(None, self.path.stem, 400)
+
+        self.assertEqual(state["resume"]["path"], str(self.path))
+        self.assertEqual(state["resume"]["turns"][0]["text"], "hello")
+
+    def test_the_whole_session_is_searched_not_the_window(self):
+        self.path.write_text(record("said") + "".join(
+            json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "name": "Bash", "input": {"command": f"c{i}"}},
+            ]}}) + "\n"
+            for i in range(30)
+        ))
+        state = pergula.build_state(None, self.path.stem, 5)
+
+        self.assertEqual(state["resume"]["turns"][0]["text"], "said")
 
 
 class SessionTitle(TempTranscript):

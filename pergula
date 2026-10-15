@@ -55,6 +55,12 @@ TAIL_BYTES = 256 * 1024
 # Turns sent to the page by default; the rest stays a click away.
 DEFAULT_LIMIT = 400
 
+# What a fresh session is handed to pick up an old one: the last few things said,
+# without the commands and their output. A message longer than the clip keeps
+# its head and its tail, because a closing summary puts what is left at the end.
+RESUME_TURNS = 6
+RESUME_CLIP = 1500
+
 # Project nicknames live next to the transcripts they rename, so they survive
 # reinstalls of this script and are trivial to inspect or delete by hand.
 NAMES_PATH = Path.home() / ".claude" / "pergula-names.json"
@@ -731,10 +737,15 @@ def parse_lines(lines, messages: list[dict]) -> None:
         content = message.get("content")
         stamp = record.get("timestamp", "")
 
+        # What the CLI injects on the user's behalf — a skill's body, an image
+        # placeholder — is shown like any other turn, but nobody typed it.
+        injected = bool(record.get("isMeta"))
+
         if isinstance(content, str):
             text = strip_noise(content)
             if text:
-                messages.append({"role": role, "kind": "text", "text": text, "ts": stamp})
+                messages.append({"role": role, "kind": "text", "text": text, "ts": stamp,
+                                 "meta": injected})
             continue
 
         if not isinstance(content, list):
@@ -749,7 +760,8 @@ def parse_lines(lines, messages: list[dict]) -> None:
             if kind == "text":
                 text = strip_noise(block.get("text", ""))
                 if text:
-                    messages.append({"role": role, "kind": "text", "text": text, "ts": stamp})
+                    messages.append({"role": role, "kind": "text", "text": text, "ts": stamp,
+                                     "meta": injected})
                 continue
 
             if kind == "tool_use":
@@ -825,6 +837,45 @@ def parse_transcript(path: Path) -> list[dict]:
     return messages
 
 
+def clip_middle(text: str, limit: int = RESUME_CLIP) -> str:
+    if len(text) <= limit:
+        return text
+
+    head = limit * 3 // 5
+    tail = limit - head
+
+    return f"{text[:head].rstrip()}\n[…]\n{text[-tail:].lstrip()}"
+
+
+def resume_turns(messages: list[dict]) -> list[dict]:
+    """The end of the conversation as prose alone. A session resumed after hours
+    away pays for its whole context again; these few turns are what a new one
+    needs to carry on, and they cost a page of text instead.
+
+    A turn is everything one side said before the other spoke. Claude narrates
+    between commands, so of its turn only the last thing said is kept — where it
+    ended up, not how it got there."""
+    turns: list[dict] = []
+    for message in messages:
+        unspoken = message["kind"] != "text" or message.get("meta")
+        if unspoken:
+            continue
+
+        role, text = message["role"], message["text"]
+        answers = not turns or turns[-1]["role"] != role
+        if answers:
+            turns.append({"role": role, "text": text})
+            continue
+
+        said = turns[-1]
+        said["text"] = f"{said['text']}\n\n{text}" if role == "user" else text
+
+    return [
+        {"role": turn["role"], "text": clip_middle(turn["text"])}
+        for turn in turns[-RESUME_TURNS:]
+    ]
+
+
 def build_state(scope: Path | None, session: str | None, limit: int) -> dict:
     path = find_transcript(scope, session)
     if path is None:
@@ -842,6 +893,7 @@ def build_state(scope: Path | None, session: str | None, limit: int) -> dict:
         "session": session_meta(path),
         "messages": window,
         "total": total,
+        "resume": {"path": str(path), "turns": resume_turns(messages)},
     }
 
 
@@ -1193,7 +1245,7 @@ PAGE = r"""<!doctype html>
   body.library #rail .sessions-only { display: none; }
   body.library #rail .library-only { display: flex; }
   body.library #scroller { display: none; }
-  body.library #top .swatch, body.library #copySid { display: none; }
+  body.library #top .swatch, body.library #copySid, body.library #copyResume { display: none; }
   /* A snippet with no group has no summary above it to indent under. */
   .session.flat { padding-left: 9px; }
   .session .rowcopy { flex: none; opacity: 0; transition: opacity .12s; }
@@ -1204,11 +1256,27 @@ PAGE = r"""<!doctype html>
   #favourites { flex: none; padding: 9px 8px; border-bottom: 1px solid var(--line); }
   #favourites:empty { display: none; }
   body.library #rail #favourites { display: none; }
-  .fav-head {
-    padding: 0 6px 6px;
-    font-size: 10px; letter-spacing: .09em; text-transform: uppercase;
+  /* A block of the rail that folds down to its heading. Folded, the heading
+     says what it is hiding when that fits in a word. */
+  .fold-head {
+    display: flex; align-items: center; gap: 6px;
+    width: 100%; padding: 0 6px 6px; text-align: left;
+    background: none; border: 0; cursor: pointer;
+    font: inherit; font-size: 10px; letter-spacing: .09em; text-transform: uppercase;
     color: var(--subtle); font-weight: 600;
   }
+  .fold-head:hover { color: var(--body); }
+  .fold-head:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .fold-head::before { content: "\25BE"; font-size: 10px; }
+  .fold-head .state { display: none; margin-left: auto; color: var(--accent); }
+  .folded > .fold-head { padding-bottom: 0; }
+  .folded > .fold-head::before { content: "\25B8"; }
+  .folded > .fold-head .state { display: inline; }
+  /* The id is there to outrank `#rail .follow`, which sets its own display. */
+  #rail .folded > :not(.fold-head) { display: none; }
+  #options { margin-top: 12px; }
+  #options .fold-head { padding-left: 0; padding-right: 0; }
+  #options .scope { margin-top: 0; }
   .fav {
     display: flex; align-items: center; gap: 8px;
     width: 100%; text-align: left;
@@ -1332,6 +1400,16 @@ PAGE = r"""<!doctype html>
   .project > summary .count { margin-left: auto; color: var(--subtle); font-size: 11px; }
   .project > summary::before { content: "\25B8"; color: var(--subtle); font-size: 10px; }
   .project[open] > summary::before { content: "\25BE"; }
+  /* The days a project was worked on, as rules across its list. They show
+     only when the list spans more than one, so a morning's work is not filed
+     under a lone "today". */
+  .day {
+    display: flex; align-items: center; gap: 8px;
+    padding: 9px 9px 3px 22px;
+    font-size: 10px; letter-spacing: .09em; text-transform: uppercase;
+    color: var(--subtle);
+  }
+  .day::after { content: ""; flex: 1; height: 1px; background: var(--line); }
   .session {
     display: flex; align-items: center; gap: 8px;
     width: 100%; text-align: left;
@@ -1532,21 +1610,29 @@ PAGE = r"""<!doctype html>
 
     <input id="filter" type="search" data-i18n-ph="filterPlaceholder" autocomplete="off">
 
-    <div class="scope sessions-only">
-      <button id="scopeLive" type="button" data-i18n-title="activeTitle" data-i18n="active"></button>
-
-      <button id="scopeAll" type="button" data-i18n="all"></button>
-    </div>
-
     <div class="scope library-only">
       <button id="snipNew" type="button" data-i18n="newSnippet"></button>
     </div>
 
-    <label class="follow sessions-only"><input type="checkbox" id="follow" checked> <span data-i18n="followLive"></span></label>
+    <div class="sessions-only" id="options">
+      <button class="fold-head" type="button">
+        <span data-i18n="options"></span>
 
-    <label class="follow sessions-only"><input type="checkbox" id="showTools" checked> <span data-i18n="showCommands"></span></label>
+        <span class="state" id="optionsState"></span>
+      </button>
 
-    <label class="follow sessions-only"><input type="checkbox" id="showResults"> <span data-i18n="showOutputs"></span></label>
+      <div class="scope">
+        <button id="scopeLive" type="button" data-i18n-title="activeTitle" data-i18n="active"></button>
+
+        <button id="scopeAll" type="button" data-i18n="all"></button>
+      </div>
+
+      <label class="follow"><input type="checkbox" id="follow" checked> <span data-i18n="followLive"></span></label>
+
+      <label class="follow"><input type="checkbox" id="showTools" checked> <span data-i18n="showCommands"></span></label>
+
+      <label class="follow"><input type="checkbox" id="showResults"> <span data-i18n="showOutputs"></span></label>
+    </div>
   </div>
 
   <div id="favourites" class="sessions-only"></div>
@@ -1593,6 +1679,14 @@ PAGE = r"""<!doctype html>
         <path d="M15 6.5V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h.5"/>
       </svg>
       <span class="tip" id="sidTip" data-i18n="sessionId"></span>
+    </button>
+
+    <button class="iconbtn" id="copyResume" type="button" data-i18n-aria="resumeLabel">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M5 5v6a3 3 0 0 0 3 3h11"/>
+        <path d="M15 10l4 4-4 4"/>
+      </svg>
+      <span class="tip" id="resumeTip" data-i18n="resumeHint"></span>
     </button>
 
     <span class="meta" id="meta"></span>
@@ -1661,6 +1755,8 @@ const sidEl = document.getElementById('sidTip');
 const railTip = document.getElementById('railTip');
 const metaEl = document.getElementById('meta');
 const copySid = document.getElementById('copySid');
+const copyResume = document.getElementById('copyResume');
+const resumeTip = document.getElementById('resumeTip');
 const railToggle = document.getElementById('railToggle');
 const toggles = {
   tools: document.getElementById('showTools'),
@@ -1677,6 +1773,7 @@ let rendered = [];
 let total = 0;
 let limit = 400;
 let session = null;
+let resume = null;
 let pinnedToBottom = true;
 let collapsed = new Set(JSON.parse(localStorage.getItem('pergula:collapsed') || '[]'));
 
@@ -1694,6 +1791,9 @@ const snipDelete = document.getElementById('snipDelete');
 const snipWhere = document.getElementById('snipWhere');
 const snipStar = document.getElementById('snipStar');
 const favourites = document.getElementById('favourites');
+const options = document.getElementById('options');
+const optionsState = document.getElementById('optionsState');
+const folded = new Set(JSON.parse(localStorage.getItem('pergula:folded') || '[]'));
 const palette = document.getElementById('palette');
 const paletteInput = document.getElementById('paletteInput');
 const paletteList = document.getElementById('paletteList');
@@ -1725,6 +1825,13 @@ const STRINGS = {
     sessionId: 'ID da sessão', sessionIdCopy: 'ID da sessão · copiar',
     idCopied: 'id copiado', copyFailed: 'não foi possível copiar',
     copyIdLabel: 'copiar id da sessão',
+    resumeHint: 'retomar em sessão nova · copiar prompt',
+    resumeLabel: 'copiar prompt de retomada',
+    resumeCopied: 'prompt copiado',
+    resumeIntro: 'Vou continuar aqui o trabalho de uma sessão anterior do Claude Code. Reabrir aquela sessão custaria o contexto inteiro de novo, então abaixo vai só o final dela.',
+    resumeSession: 'Sessão', resumeProject: 'Projeto',
+    resumeRecent: 'Últimas mensagens, sem comandos nem saídas',
+    resumeAsk: 'Antes de qualquer outra coisa, diga em poucas linhas onde paramos e o que falta. Se precisar de mais contexto, leia só o final do transcript (JSONL, um registro por linha, com saídas de ferramentas enormes) e nunca o arquivo inteiro.',
     copy: 'copiar', copied: 'copiado', copyAll: 'copiar tudo',
     roleYou: 'você', roleClaude: 'claude', roleCommand: 'comando', roleOutput: 'saída',
     line: 'linha', lines: 'linhas',
@@ -1741,6 +1848,9 @@ const STRINGS = {
     nothingFound: 'nada encontrado',
     filterSnippets: 'filtrar snippet',
     favourites: 'favoritos',
+    options: 'exibição',
+    dayToday: 'hoje', dayYesterday: 'ontem',
+    dayWeek: 'últimos 7 dias', dayMonth: 'últimos 30 dias', dayOlder: 'mais antigas',
     favouriteAdd: 'fixar nos favoritos',
     favouriteDrop: 'tirar dos favoritos',
     favouriteFull: 'no máximo 5 favoritos',
@@ -1768,6 +1878,13 @@ const STRINGS = {
     sessionId: 'session id', sessionIdCopy: 'session id · copy',
     idCopied: 'id copied', copyFailed: 'could not copy',
     copyIdLabel: 'copy session id',
+    resumeHint: 'resume in a new session · copy prompt',
+    resumeLabel: 'copy resume prompt',
+    resumeCopied: 'prompt copied',
+    resumeIntro: 'I am picking up here the work of an earlier Claude Code session. Reopening that one would pay for its whole context again, so below is only the end of it.',
+    resumeSession: 'Session', resumeProject: 'Project',
+    resumeRecent: 'Last messages, without commands or their output',
+    resumeAsk: 'Before anything else, tell me in a few lines where we stopped and what is left. If you need more context, read only the end of the transcript (JSONL, one record per line, with very large tool outputs) and never the whole file.',
     copy: 'copy', copied: 'copied', copyAll: 'copy all',
     roleYou: 'you', roleClaude: 'claude', roleCommand: 'command', roleOutput: 'output',
     line: 'line', lines: 'lines',
@@ -1784,6 +1901,9 @@ const STRINGS = {
     nothingFound: 'nothing found',
     filterSnippets: 'filter snippets',
     favourites: 'favourites',
+    options: 'view',
+    dayToday: 'today', dayYesterday: 'yesterday',
+    dayWeek: 'last 7 days', dayMonth: 'last 30 days', dayOlder: 'older',
     favouriteAdd: 'pin to favourites',
     favouriteDrop: 'remove from favourites',
     favouriteFull: 'five favourites at most',
@@ -2245,6 +2365,48 @@ function inScope(meta) {
   return (Date.now() / 1000 - meta.mtime) <= ACTIVE_WINDOW;
 }
 
+function paintFold(panel) {
+  const shut = folded.has(panel.id);
+
+  panel.classList.toggle('folded', shut);
+  panel.querySelector('.fold-head').setAttribute('aria-expanded', String(!shut));
+}
+
+function toggleFold(panel) {
+  const shut = !folded.has(panel.id);
+  if (shut) folded.add(panel.id);
+  if (!shut) folded.delete(panel.id);
+
+  localStorage.setItem('pergula:folded', JSON.stringify([...folded]));
+  paintFold(panel);
+}
+
+// Calendar days, not spans of 24 hours: something from 23:00 last night is
+// yesterday's, however few hours ago it was.
+function dayRank(epoch) {
+  const today = new Date().setHours(0, 0, 0, 0);
+  const then = new Date(epoch * 1000).setHours(0, 0, 0, 0);
+
+  // Rounded, because a day that changes the clocks is not 24 hours long.
+  const age = Math.round((today - then) / 86400000);
+  if (age <= 0) return 0;
+  if (age === 1) return 1;
+  if (age <= 7) return 2;
+  if (age <= 30) return 3;
+  return 4;
+}
+
+function dayNames() {
+  return [t('dayToday'), t('dayYesterday'), t('dayWeek'), t('dayMonth'), t('dayOlder')];
+}
+
+function buildDayLabel(text) {
+  const label = document.createElement('div');
+  label.className = 'day';
+  label.textContent = text;
+  return label;
+}
+
 // The manual order rules; whatever is not in it follows, in the server's order.
 function applyOrder(slug, hits) {
   const manual = manualOrder[slug];
@@ -2258,11 +2420,17 @@ function applyOrder(slug, hits) {
   return placed.concat(fresh);
 }
 
+// A session is dragged among the others of its own day. Letting it land under
+// another heading would only show a drop that the next redraw takes back.
+function dayPeers(group, row) {
+  return [...group.querySelectorAll('.session:not(.dragging)')]
+    .filter((peer) => peer.dataset.rank === row.dataset.rank);
+}
+
 // Where to drop: the first row whose middle has passed the cursor.
-function rowBelow(group, y) {
-  const rows = [...group.querySelectorAll('.session:not(.dragging)')];
-  return rows.find((row) => {
-    const box = row.getBoundingClientRect();
+function rowBelow(peers, y) {
+  return peers.find((peer) => {
+    const box = peer.getBoundingClientRect();
     return y < box.top + box.height / 2;
   }) || null;
 }
@@ -2281,13 +2449,16 @@ function makeSortable(group, slug) {
     if (!row) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = 'move';
-    const below = rowBelow(group, event.clientY);
+    const peers = dayPeers(group, row);
+    if (!peers.length) return;
+
+    const below = rowBelow(peers, event.clientY);
     if (below) {
       group.insertBefore(row, below);
       return;
     }
 
-    group.appendChild(row);
+    peers[peers.length - 1].after(row);
   });
 
   group.addEventListener('dragend', () => {
@@ -2402,6 +2573,7 @@ function drawTree() {
   }
 
   const needle = filter.value.trim().toLowerCase();
+  const names = dayNames();
   tree.replaceChildren();
   visibleRows = [];
 
@@ -2455,9 +2627,23 @@ function drawTree() {
       localStorage.setItem('pergula:collapsed', JSON.stringify([...collapsed]));
     });
 
-    for (const meta of applyOrder(project.slug, hits)) {
-      visibleRows.push(meta.id);
-      group.appendChild(buildSessionRow(meta, visibleRows.length));
+    // The day comes first and the manual order rules inside it: the sort is
+    // stable, so a session dragged within its day stays where it was put.
+    const dated = applyOrder(project.slug, hits)
+      .map((meta) => ({ meta, rank: dayRank(meta.mtime) }))
+      .sort((a, b) => a.rank - b.rank);
+    const spansDays = new Set(dated.map((entry) => entry.rank)).size > 1;
+    let day = -1;
+
+    for (const entry of dated) {
+      const opensDay = spansDays && entry.rank !== day;
+      if (opensDay) group.appendChild(buildDayLabel(names[entry.rank]));
+      day = entry.rank;
+
+      visibleRows.push(entry.meta.id);
+      const row = buildSessionRow(entry.meta, visibleRows.length);
+      row.dataset.rank = entry.rank;
+      group.appendChild(row);
     }
 
     makeSortable(group, project.slug);
@@ -2505,6 +2691,7 @@ function setLang(next) {
   // rebuild rather than swap a few loose labels.
   rendered = [];
   drawTop();
+  paintScope();
   drawFavourites();
   paintStar();
   drawTree();
@@ -2599,6 +2786,7 @@ function toggleAwake() {
 function paintScope() {
   scopeLive.classList.toggle('on', scope === 'live');
   scopeAll.classList.toggle('on', scope === 'all');
+  optionsState.textContent = t(scope === 'live' ? 'active' : 'all');
 }
 
 function setScope(next) {
@@ -2687,10 +2875,13 @@ function drawFavourites() {
   const starred = favouriteSnippets();
   if (!starred.length) return;
 
-  const head = document.createElement('div');
-  head.className = 'fav-head';
+  const head = document.createElement('button');
+  head.type = 'button';
+  head.className = 'fold-head';
   head.textContent = t('favourites');
+  head.addEventListener('click', () => toggleFold(favourites));
   favourites.appendChild(head);
+  paintFold(favourites);
 
   for (const item of starred) {
     const row = document.createElement('button');
@@ -3295,25 +3486,69 @@ function toggleRail() {
 
 railToggle.addEventListener('click', toggleRail);
 
-copySid.addEventListener('click', () => {
-  if (!session) return;
-  const previous = sidEl.innerHTML;
+options.querySelector('.fold-head').addEventListener('click', () => toggleFold(options));
+
+// The session in a page of text, to paste into a new one: what it was, where
+// its transcript is, and the last things said.
+function resumePrompt() {
+  const where = (session.cwd || session.slug) + (session.branch ? ' (' + session.branch + ')' : '');
+  const turns = resume.turns.map((turn) => {
+    return '[' + t(turn.role === 'user' ? 'roleYou' : 'roleClaude') + ']\n' + turn.text;
+  });
+
+  return [
+    t('resumeIntro'),
+    '',
+    t('resumeSession') + ': ' + session.title,
+    'ID: ' + session.id,
+    t('resumeProject') + ': ' + where,
+    'Transcript: ' + resume.path,
+    '',
+    t('resumeRecent') + ':',
+    '',
+    turns.join('\n\n'),
+    '',
+    t('resumeAsk'),
+  ].join('\n');
+}
+
+function copyFromTop(button, tip, payload, hit) {
+  // A second click while the answer is still showing would remember the answer
+  // as the hint, and put it back for good.
+  if (tip.dataset.busy) return;
+
+  const previous = tip.innerHTML;
+  tip.dataset.busy = '1';
 
   // Without the catch, a refusal from the clipboard gave no sign at all: the
   // click simply did nothing visible.
   const restore = () => setTimeout(() => {
-    sidEl.innerHTML = previous;
-    copySid.classList.remove('done');
+    tip.innerHTML = previous;
+    tip.dataset.busy = '';
+    button.classList.remove('done');
   }, 1400);
 
-  navigator.clipboard.writeText(session.id).then(() => {
-    sidEl.textContent = t('idCopied');
-    copySid.classList.add('done');
+  navigator.clipboard.writeText(payload).then(() => {
+    tip.textContent = hit;
+    button.classList.add('done');
     restore();
   }).catch(() => {
-    sidEl.textContent = t('copyFailed');
+    tip.textContent = t('copyFailed');
     restore();
   });
+}
+
+copySid.addEventListener('click', () => {
+  if (!session) return;
+
+  copyFromTop(copySid, sidEl, session.id, t('idCopied'));
+});
+
+copyResume.addEventListener('click', () => {
+  const ready = session && resume && resume.turns.length;
+  if (!ready) return;
+
+  copyFromTop(copyResume, resumeTip, resumePrompt(), t('resumeCopied'));
 });
 
 function onPick(id) {
@@ -3341,6 +3576,7 @@ function onState(payload) {
 
   stateToken = payload.token;
   session = payload.session;
+  resume = payload.resume || null;
   total = payload.total || next.length;
   drawTop();
 
@@ -3407,6 +3643,7 @@ async function pollIndex() {
 
 paintLang();
 paintScope();
+paintFold(options);
 paintView();
 pollState();
 pollIndex();

@@ -69,6 +69,16 @@ on hover, so they are never in the way of reading.
 
 ![The copy button on a code block](docs/copying.png)
 
+### Picking a session back up
+
+A session left alone for a few hours has lost its prompt cache, and the next
+message in it pays for the whole context again. The arrow beside the session id
+in the header copies a prompt for a new session instead: the title, the id, the
+project, where the transcript is, and the last few turns — without the
+commands and their output, which is where the size of a transcript goes. Paste it
+into a fresh `claude` and it starts from a page of text rather than from
+everything.
+
 ## What it shows
 
 A sidebar groups every session by project. Sessions carry the name and the colour
@@ -79,6 +89,14 @@ guessed from the process table.
 
 Whatever you are reading stays on the list regardless, so it never vanishes under
 you mid-sentence. The page never scrolls itself while text is selected.
+
+Inside a project the sessions fall under the day they were last touched — today,
+yesterday, the last 7 days, the last 30, older — and the headings only appear when
+a project spans more than one. Dragging still reorders, within a day.
+
+The **view** block and the favourites each fold down to their heading, for when
+the list needs the room. Folded, **view** still says whether you are looking at
+active sessions or all of them.
 
 Project nicknames live in `~/.claude/pergula-names.json`, next to the transcripts
 they rename, so they survive reinstalls and are trivial to inspect or delete by
