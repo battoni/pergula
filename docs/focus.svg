@@ -1,0 +1,177 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 460" width="760" height="460" role="img" aria-labelledby="title desc">
+  <title id="title">Focus mode in pergula</title>
+  <desc id="desc">cmd+A then cmd+F leaves only the open session's project on the list; a click on the chip brings the others back.</desc>
+
+  <!-- Colours are the :root tokens in pergula. The projects and sessions are made up. -->
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+    .list   { animation: drop 9s ease-in-out infinite; }
+    .others { animation: fade 9s ease-in-out infinite; }
+    .focus  { animation: lift 9s ease-in-out infinite; }
+    .chip   { animation: chip 9s ease-in-out infinite; }
+    .press  { animation: press 9s linear infinite; }
+    .key-a  { animation: keyA 9s ease-out infinite; }
+    .key-f  { animation: keyF 9s ease-out infinite; }
+    .cursor { animation: cursor 9s ease-in-out infinite; }
+    .ripple { animation: ripple 9s ease-out infinite; transform-box: fill-box; transform-origin: center; }
+
+    @keyframes drop  { 0%, 22% { transform: translateY(0); }      28%, 72% { transform: translateY(36px); }   78%, 100% { transform: translateY(0); } }
+    @keyframes lift  { 0%, 23% { transform: translateY(0); }      28%, 72% { transform: translateY(-104px); } 78%, 100% { transform: translateY(0); } }
+    @keyframes fade  { 0%, 21% { opacity: 1; }                    24%, 72% { opacity: 0; }                    77%, 100% { opacity: 1; } }
+    @keyframes chip  { 0%, 24% { opacity: 0; }                    28%, 71% { opacity: 1; }                    75%, 100% { opacity: 0; } }
+    @keyframes press { 0%, 67% { opacity: 0; }                    68%, 70% { opacity: 1; }                    71%, 100% { opacity: 0; } }
+    @keyframes keyA  { 0%, 10% { opacity: 0; transform: translateY(6px); } 12%, 30% { opacity: 1; transform: translateY(0); } 34%, 100% { opacity: 0; transform: translateY(0); } }
+    @keyframes keyF  { 0%, 16% { opacity: 0; transform: translateY(6px); } 18%, 30% { opacity: 1; transform: translateY(0); } 34%, 100% { opacity: 0; transform: translateY(0); } }
+    @keyframes cursor {
+      0%, 52% { opacity: 0; transform: translate(560px, 330px); }
+      55%     { opacity: 1; transform: translate(560px, 330px); }
+      66%, 70% { opacity: 1; transform: translate(150px, 142px); }
+      69%     { transform: translate(150px, 142px) scale(.9); }
+      78%     { opacity: 1; transform: translate(170px, 250px); }
+      82%, 100% { opacity: 0; transform: translate(170px, 250px); }
+    }
+    @keyframes ripple { 0%, 68% { opacity: 0; transform: scale(.2); } 69% { opacity: .55; transform: scale(.4); } 76%, 100% { opacity: 0; transform: scale(1.6); } }
+
+    /* Without motion, the focused frame: it is the one that shows the feature. */
+    @media (prefers-reduced-motion: reduce) {
+      .list, .others, .focus, .chip, .press, .key-a, .key-f, .cursor, .ripple { animation: none; }
+      .list   { transform: translateY(36px); }
+      .focus  { transform: translateY(-104px); }
+      .others, .press, .key-a, .key-f, .cursor, .ripple { opacity: 0; }
+    }
+  </style>
+
+  <defs>
+    <clipPath id="window"><rect width="760" height="460" rx="12"/></clipPath>
+    <clipPath id="rail"><rect x="0" y="28" width="240" height="432"/></clipPath>
+  </defs>
+
+  <g clip-path="url(#window)">
+    <rect width="760" height="460" fill="#14120f"/>
+
+    <!-- title bar -->
+    <rect width="760" height="28" fill="#191614"/>
+    <circle cx="16" cy="14" r="5" fill="#ec6a5e"/>
+    <circle cx="32" cy="14" r="5" fill="#f4bf4f"/>
+    <circle cx="48" cy="14" r="5" fill="#61c554"/>
+    <text x="380" y="18" text-anchor="middle" font-size="11" fill="#6f665e">pergula</text>
+    <line x1="0" y1="28.5" x2="760" y2="28.5" stroke="#322c28"/>
+
+    <!-- rail -->
+    <rect x="0" y="29" width="240" height="431" fill="#191614"/>
+    <line x1="240.5" y1="29" x2="240.5" y2="460" stroke="#322c28"/>
+
+    <g transform="translate(20 46) scale(.05)" fill="#c0e021">
+      <path d="M32 32 L480 32 L480 128 L32 128 Z"/>
+      <path d="M32 192 L288 192 L352 288 L32 288 Z"/>
+      <path d="M288 352 L480 352 L480 448 L352 448 Z"/>
+    </g>
+    <text x="50" y="65" font-size="19" font-weight="600" fill="#c0e021">pergula</text>
+
+    <rect x="16.5" y="88.5" width="207" height="30" rx="8" fill="#12100e" stroke="#322c28"/>
+    <text x="28" y="108" font-size="11.5" fill="#6f665e">filter project or session</text>
+
+    <g class="chip">
+      <rect x="16.5" y="128.5" width="207" height="28" rx="7" fill="#2a3210" stroke="#c0e021"/>
+      <rect class="press" x="16.5" y="128.5" width="207" height="28" rx="7" fill="#c0e021" fill-opacity=".18"/>
+      <text x="28" y="147" font-size="11.5" fill="#f2ece4">focus</text>
+      <text x="64" y="147" font-size="11.5" font-weight="700" fill="#f2ece4">ORCHARD</text>
+      <text x="212" y="147" text-anchor="end" font-size="11" fill="#9b8f84">cmd+A F</text>
+    </g>
+
+    <g clip-path="url(#rail)">
+      <g class="list">
+        <!-- LEDGER -->
+        <g class="others">
+          <text x="20" y="150" font-size="11" font-weight="700" fill="#f2ece4">LEDGER</text>
+          <text x="220" y="150" text-anchor="end" font-size="10.5" fill="#6f665e">1</text>
+          <circle cx="30" cy="168" r="3.5" fill="#85b06b"/>
+          <text x="42" y="172" font-size="12" fill="#ddd5cb">Reconcile the March imports</text>
+        </g>
+
+        <!-- atlas-api -->
+        <g class="others">
+          <text x="20" y="202" font-size="11" font-weight="700" fill="#f2ece4">atlas-api</text>
+          <text x="220" y="202" text-anchor="end" font-size="10.5" fill="#6f665e">1</text>
+          <circle cx="30" cy="220" r="3.5" fill="#f0a03c"/>
+          <text x="42" y="224" font-size="12" fill="#ddd5cb">Rate limits on the public routes</text>
+        </g>
+
+        <!-- ORCHARD: the project of the open session -->
+        <g class="focus">
+          <text x="20" y="254" font-size="11" font-weight="700" fill="#f2ece4">ORCHARD</text>
+          <text x="220" y="254" text-anchor="end" font-size="10.5" fill="#6f665e">3</text>
+          <rect x="10" y="261" width="220" height="22" rx="6" fill="#232020"/>
+          <rect x="10" y="261" width="2.5" height="22" fill="#c0e021"/>
+          <circle cx="30" cy="272" r="3.5" fill="#6fa8d6"/>
+          <text x="42" y="276" font-size="12" fill="#f2ece4">Wire checkout to the tax rules</text>
+          <circle cx="30" cy="294" r="3.5" fill="#85b06b"/>
+          <text x="42" y="298" font-size="12" fill="#ddd5cb">Seed the spring catalogue</text>
+          <text x="42" y="320" font-size="12" fill="#9b8f84">Review: supplier onboarding</text>
+        </g>
+
+        <!-- BRIGHTSIDE -->
+        <g class="others">
+          <text x="20" y="350" font-size="11" font-weight="700" fill="#f2ece4">BRIGHTSIDE</text>
+          <text x="220" y="350" text-anchor="end" font-size="10.5" fill="#6f665e">1</text>
+          <circle cx="30" cy="368" r="3.5" fill="#6fa8d6"/>
+          <text x="42" y="372" font-size="12" fill="#ddd5cb">Landing page copy, second pass</text>
+        </g>
+
+        <!-- pergula -->
+        <g class="others">
+          <text x="20" y="402" font-size="11" font-weight="700" fill="#f2ece4">pergula</text>
+          <text x="220" y="402" text-anchor="end" font-size="10.5" fill="#6f665e">1</text>
+          <circle cx="30" cy="420" r="3.5" fill="#85b06b"/>
+          <text x="42" y="424" font-size="12" fill="#ddd5cb">Two-line header for portrait</text>
+        </g>
+      </g>
+    </g>
+
+    <!-- pane: the open session, from ORCHARD -->
+    <rect x="241" y="29" width="519" height="58" fill="#191614"/>
+    <line x1="241" y1="87.5" x2="760" y2="87.5" stroke="#322c28"/>
+    <circle cx="266" cy="51" r="5" fill="#c0e021"/>
+    <text x="280" y="56" font-size="14" font-weight="600" fill="#f2ece4">Wire checkout to the tax rules</text>
+    <text x="280" y="76" font-size="11.5" fill="#6f665e">~/Work/orchard · main</text>
+
+    <text x="274" y="120" font-size="10.5" font-weight="700" letter-spacing=".08em" fill="#6fa8d6">YOU</text>
+    <rect x="274" y="130" width="452" height="54" rx="10" fill="#171d24" stroke="#322c28"/>
+    <rect x="274" y="130" width="3" height="54" fill="#6fa8d6"/>
+    <text x="294" y="153" font-size="13" fill="#ddd5cb">The tax table changed on the first. Make checkout</text>
+    <text x="294" y="172" font-size="13" fill="#ddd5cb">read the new rates and keep the old ones for refunds.</text>
+
+    <text x="274" y="214" font-size="10.5" font-weight="700" letter-spacing=".08em" fill="#d97757">CLAUDE</text>
+    <rect x="274" y="224" width="452" height="96" rx="10" fill="#1f1a17" stroke="#322c28"/>
+    <rect x="274" y="224" width="3" height="96" fill="#d97757"/>
+    <text x="294" y="247" font-size="13" fill="#ddd5cb">Done. Rates now come from the dated table, so a</text>
+    <text x="294" y="266" font-size="13" fill="#ddd5cb">refund uses the rate of the day it was paid.</text>
+    <rect x="294" y="279" width="250" height="26" rx="6" fill="#12100e" stroke="#322c28"/>
+    <text x="304" y="296" class="mono" font-size="11.5" fill="#ddd5cb">checkout/tax.py  +48 −12</text>
+
+    <text x="274" y="350" font-size="10.5" font-weight="700" letter-spacing=".08em" fill="#85b06b">COMMAND</text>
+    <rect x="274" y="360" width="452" height="40" rx="10" fill="#171c16" stroke="#322c28"/>
+    <rect x="274" y="360" width="3" height="40" fill="#85b06b"/>
+    <text x="294" y="384" class="mono" font-size="11.5" fill="#ddd5cb">make test  ·  212 passed</text>
+
+    <!-- the keys being pressed -->
+    <g class="key-a">
+      <rect x="430" y="414" width="64" height="30" rx="7" fill="#232020" stroke="#9b8f84"/>
+      <text x="462" y="434" text-anchor="middle" font-size="13" font-weight="600" fill="#f2ece4">⌘ A</text>
+    </g>
+    <g class="key-f">
+      <rect x="502" y="414" width="64" height="30" rx="7" fill="#232020" stroke="#9b8f84"/>
+      <text x="534" y="434" text-anchor="middle" font-size="13" font-weight="600" fill="#f2ece4">⌘ F</text>
+    </g>
+
+    <circle class="ripple" cx="150" cy="142" r="22" fill="#c0e021"/>
+
+    <g class="cursor">
+      <path d="M0 0 L0 17 L4.5 13 L7.5 20 L10.5 18.8 L7.6 12 L13 12 Z" fill="#f2ece4" stroke="#14120f" stroke-width="1.2" stroke-linejoin="round"/>
+    </g>
+  </g>
+
+  <rect x=".5" y=".5" width="759" height="459" rx="12" fill="none" stroke="#322c28"/>
+</svg>

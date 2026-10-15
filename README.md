@@ -70,6 +70,15 @@ on hover, so they are never in the way of reading.
 
 ![The copy button on a code block](docs/copying.png)
 
+### Focus on one project
+
+When there is one project you should be working on, `cmd+A` then `cmd+F` takes
+every other one off the list. The open session's project stays, with any project
+in a folder under it, until the same keys or a click on the chip bring the rest
+back. It is remembered, so a reload does not undo it.
+
+<img src="docs/focus.svg" alt="cmd+A then cmd+F leaves one project on the list; a click on the chip brings the others back" width="760">
+
 ### Picking a session back up
 
 A session left alone for a few hours has lost its prompt cache, and the next
