@@ -402,6 +402,63 @@ class Blocks(TempTranscript):
                          ["good", "also good"])
 
 
+class AgentState(unittest.TestCase):
+    """The four states come from a file another program writes. When it is
+    missing, stale or wrong the row must still say something true."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        patcher = unittest.mock.patch.object(pergula, "AGENT_STATE_PATH", Path(self.directory.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def write(self, session, state):
+        (Path(self.directory.name) / f"{session}.json").write_text(json.dumps({"state": state}))
+
+    def test_without_a_file_the_registry_answers(self):
+        self.assertEqual(pergula.agent_state("abc-1", "busy"), "working")
+        self.assertEqual(pergula.agent_state("abc-1", "idle"), "ready")
+
+    def test_the_file_says_what_the_registry_cannot(self):
+        self.write("abc-1", "needs_you")
+
+        self.assertEqual(pergula.agent_state("abc-1", "busy"), "needs_you")
+
+    def test_an_error_is_kept(self):
+        self.write("abc-1", "error")
+
+        self.assertEqual(pergula.agent_state("abc-1", "idle"), "error")
+
+    def test_an_interrupted_turn_is_ready_not_working(self):
+        self.write("abc-1", "working")
+
+        self.assertEqual(pergula.agent_state("abc-1", "idle"), "ready")
+
+    def test_an_unknown_state_falls_back(self):
+        self.write("abc-1", "dancing")
+
+        self.assertEqual(pergula.agent_state("abc-1", "busy"), "working")
+
+    def test_a_file_that_is_not_an_object_falls_back(self):
+        (Path(self.directory.name) / "abc-1.json").write_text("[1, 2]")
+
+        self.assertEqual(pergula.agent_state("abc-1", "idle"), "ready")
+
+    def test_an_id_cannot_reach_outside_the_directory(self):
+        outside = Path(self.directory.name).parent / "outside.json"
+        outside.write_text(json.dumps({"state": "needs_you"}))
+        self.addCleanup(outside.unlink)
+
+        self.assertEqual(pergula.agent_state("../outside", "idle"), "ready")
+
+    def test_a_change_of_state_changes_the_index_token(self):
+        quiet = {"abc-1": {"status": "busy", "state": "working"}}
+        waiting = {"abc-1": {"status": "busy", "state": "needs_you"}}
+
+        self.assertNotEqual(pergula.live_stamp(quiet), pergula.live_stamp(waiting))
+
+
 class Translations(unittest.TestCase):
     """A missing key renders as its own name — loud to a reader, silent to a test."""
 

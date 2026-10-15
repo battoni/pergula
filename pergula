@@ -85,6 +85,14 @@ LIVE_PATH = Path.home() / ".claude" / "sessions"
 # Fallback for installs with no session registry: treat recent writes as live.
 FALLBACK_WINDOW = 2 * 3600
 
+# The registry knows busy and idle, which cannot tell "waiting for you to approve
+# something" from "working". The tab-status hooks (~/.claude/tab-status) write
+# one file per session id with four states, the same four the terminal tab titles
+# show. A session they never saw falls back to the registry's two.
+AGENT_STATE_PATH = Path.home() / ".claude" / "tab-status" / "sessions"
+AGENT_STATES = {"working", "needs_you", "ready", "error"}
+SESSION_ID = re.compile(r"[\w-]+")
+
 # Holding the Mac awake. An agent left working stops when the machine sleeps,
 # so the reader that is open anyway can keep it up for a few hours. The child
 # process is the truth; the file only exists so a restart can find the orphan
@@ -371,9 +379,11 @@ def live_sessions() -> dict:
         except OSError:
             continue
 
+        status = record.get("status") or ""
         live[session] = {
             "pid": pid,
-            "status": record.get("status") or "",
+            "status": status,
+            "state": agent_state(session, status),
             "name": record.get("name") or "",
             "since": record.get("startedAt", 0) / 1000,
         }
@@ -381,8 +391,33 @@ def live_sessions() -> dict:
     return live
 
 
+def agent_state(session: str, status: str) -> str:
+    """working, needs_you, ready or error, for a session with a live process."""
+    fallback = "working" if status == "busy" else "ready"
+
+    # The id names a file, so it must not be able to name one anywhere else.
+    if not SESSION_ID.fullmatch(session):
+        return fallback
+
+    try:
+        state = json.loads((AGENT_STATE_PATH / f"{session}.json").read_text(encoding="utf-8")).get("state")
+    except (OSError, ValueError, AttributeError):
+        return fallback
+
+    if state not in AGENT_STATES:
+        return fallback
+
+    # Esc ends a turn without firing the Stop hook, so the file can still say
+    # working long after the CLI went idle. The registry wins that one.
+    interrupted = state == "working" and status == "idle"
+    if interrupted:
+        return "ready"
+
+    return state
+
+
 def live_stamp(live: dict) -> str:
-    return ",".join(f"{session}:{data['status']}" for session, data in sorted(live.items()))
+    return ",".join(f"{session}:{data['status']}:{data['state']}" for session, data in sorted(live.items()))
 
 
 def save_caffeine(until: float, pid: int) -> None:
@@ -686,6 +721,7 @@ def build_index(scope: Path | None) -> dict:
             **meta,
             "live": bool(running),
             "status": running["status"] if running else "",
+            "state": running["state"] if running else "",
             "pid": running["pid"] if running else 0,
         }
 
@@ -1117,6 +1153,13 @@ PAGE = r"""<!doctype html>
     --danger: #e06c62;
     --rail-width: 288px;
 
+    /* What an open agent is doing: the same four colours as the emoji the
+       tab-status hooks put in the terminal tab title. */
+    --state-working: #6fa8d6;
+    --state-needs-you: #f0a03c;
+    --state-ready: #85b06b;
+    --state-error: #e06c62;
+
     /* One hue per speaker: warm for people and Claude, cool for the machine. */
     --role-you: #6fa8d6;
     --role-claude: #d97757;
@@ -1425,6 +1468,10 @@ PAGE = r"""<!doctype html>
   .session .name em { font-style: normal; color: var(--accent); }
   .session .when { color: var(--subtle); font-size: 10.5px; flex: none; }
   .session.live .when { color: var(--accent); }
+  .session .when .light { color: var(--state-ready); }
+  .session.working .when .light { color: var(--state-working); }
+  .session.needs-you .when, .session.needs-you .when .light { color: var(--state-needs-you); font-weight: 600; }
+  .session.error .when, .session.error .when .light { color: var(--state-error); font-weight: 600; }
 
   /* ---- pane ---- */
   #pane { min-width: 0; height: 100vh; display: flex; flex-direction: column; }
@@ -1842,7 +1889,9 @@ const STRINGS = {
     noRecentSession: 'nenhuma sessão nas últimas 2 horas',
     noSession: 'nenhuma sessão',
     openInTerminal: 'aberta no terminal · pid {pid} · {status}',
-    noStatus: 'sem status', autoName: '(nome automático)',
+    autoName: '(nome automático)',
+    stateWorking: 'trabalhando', stateNeedsYou: 'precisa de você',
+    stateReady: 'pronto', stateError: 'erro',
     renameHint: 'renomear projeto (vazio volta ao caminho)',
     now: 'agora', month: 'mes',
     nothingFound: 'nada encontrado',
@@ -1895,7 +1944,9 @@ const STRINGS = {
     noRecentSession: 'no session in the last 2 hours',
     noSession: 'no session',
     openInTerminal: 'open in a terminal · pid {pid} · {status}',
-    noStatus: 'no status', autoName: '(automatic name)',
+    autoName: '(automatic name)',
+    stateWorking: 'working', stateNeedsYou: 'needs you',
+    stateReady: 'ready', stateError: 'error',
     renameHint: 'rename project (empty restores the path)',
     now: 'now', month: 'mo',
     nothingFound: 'nothing found',
@@ -2483,15 +2534,48 @@ function fillName(name, meta) {
   name.appendChild(strong);
 }
 
+function stateLabel(state) {
+  if (state === 'needs_you') return t('stateNeedsYou');
+
+  if (state === 'error') return t('stateError');
+
+  if (state === 'working') return t('stateWorking');
+
+  return t('stateReady');
+}
+
+// The two states that are waiting on a person. Everything else can be left alone.
+function needsAttention(meta) {
+  const isStuck = meta.state === 'needs_you' || meta.state === 'error';
+  return meta.live && isStuck;
+}
+
+// The count goes where it can be seen without the window in front: the tab or
+// window title, and the Dock icon when this runs as an installed app.
+function drawAttention() {
+  const count = projects
+    .flatMap((project) => project.sessions)
+    .filter(needsAttention)
+    .length;
+
+  document.title = count ? '(' + count + ') pergula' : 'pergula';
+
+  if (!('setAppBadge' in navigator)) return;
+
+  const badging = count ? navigator.setAppBadge(count) : navigator.clearAppBadge();
+  // A badge the platform refuses changes nothing on the page.
+  badging.catch(() => null);
+}
+
 function buildSessionRow(meta, ordinal) {
   const row = document.createElement('button');
   row.type = 'button';
   row.className = 'session'
     + (meta.id === selectedId ? ' active' : '')
-    + (meta.live ? ' live' : '');
+    + (meta.live ? ' live ' + meta.state.replace('_', '-') : '');
   row.title = meta.id
     + (meta.live
-      ? '\n' + t('openInTerminal', { pid: meta.pid, status: meta.status || t('noStatus') })
+      ? '\n' + t('openInTerminal', { pid: meta.pid, status: stateLabel(meta.state) })
       : '')
     + (meta.renamed ? '' : '\n' + t('autoName'));
   row.draggable = true;
@@ -2516,7 +2600,13 @@ function buildSessionRow(meta, ordinal) {
 
   const when = document.createElement('span');
   when.className = 'when';
-  when.textContent = (meta.live ? '● ' : '') + ago(meta.mtime);
+  when.textContent = needsAttention(meta) ? stateLabel(meta.state) : ago(meta.mtime);
+  if (meta.live) {
+    const light = document.createElement('span');
+    light.className = 'light';
+    light.textContent = '● ';
+    when.prepend(light);
+  }
   row.appendChild(when);
 
   row.addEventListener('click', () => onPick(meta.id));
@@ -3568,6 +3658,7 @@ function onIndex(payload) {
   projects = payload.projects;
   activeId = payload.active;
   drawTree();
+  drawAttention();
 }
 
 function onState(payload) {

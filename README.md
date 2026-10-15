@@ -87,6 +87,15 @@ transcript. **active** sessions are the ones with a Claude process open in a
 terminal right now — read from the CLI's own per-pid registry in `~/.claude/sessions`, not
 guessed from the process table.
 
+Each active session carries a light for what it is doing: blue working, green
+ready, orange **needs you** (a permission, a question, a plan to approve) and red
+when the turn failed. The last two replace the time on the row, and their count
+goes into the window title and onto the Dock icon when pergula runs as an
+installed app. The registry only knows busy and idle; the other two come from
+the files the tab-status hooks write in `~/.claude/tab-status/sessions`, the
+same hooks that put the state in the terminal tab title. Without them the light
+falls back to the registry's two.
+
 Whatever you are reading stays on the list regardless, so it never vanishes under
 you mid-sentence. The page never scrolls itself while text is selected.
 
