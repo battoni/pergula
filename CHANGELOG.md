@@ -6,6 +6,10 @@ Notable changes to pergula. Newest first.
 
 ### Added
 
+- **Waiting on a shell**, a fifth light. A turn that ends with a shell it is
+  waiting on (a CI watch, a build) turns the row purple instead of green, since
+  nothing is yours to do yet; it goes back to working when the shell finishes
+  and the agent wakes. Dev servers do not count.
 - **A snippet library**, for the prompts you send every day that are not worth a
   skill. A second tab in the sidebar manages them; `cmd+K` opens a palette that
   copies one to the clipboard from anywhere in the app. Every turn of your own

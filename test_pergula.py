@@ -494,6 +494,16 @@ class AgentState(unittest.TestCase):
 
         self.assertEqual(pergula.agent_state("abc-1", "idle"), "error")
 
+    def test_a_turn_waiting_on_a_shell_is_not_ready(self):
+        self.write("abc-1", "waiting")
+
+        self.assertEqual(pergula.agent_state("abc-1", "idle"), "waiting")
+
+    def test_the_shell_finishing_wakes_it_to_working(self):
+        self.write("abc-1", "waiting")
+
+        self.assertEqual(pergula.agent_state("abc-1", "busy"), "working")
+
     def test_an_interrupted_turn_is_ready_not_working(self):
         self.write("abc-1", "working")
 

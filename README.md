@@ -116,8 +116,10 @@ same hooks that put the state in the terminal tab title. Without them the light
 falls back to the registry's two.
 
 A turn can end with subagents still running in the background. The row stays
-blue until the last one finishes, with their count where the time would be;
-shells left running, like a dev server, do not count.
+blue until the last one finishes, with their count where the time would be.
+A turn that ends waiting on a shell it started (a CI watch, a build) turns
+purple, **waiting on a shell**, until the shell finishes and the agent wakes;
+shells that never finish on their own, like a dev server, do not count.
 
 <img src="docs/states.svg" alt="An agent turns to needs you, the window title counts it, and a click takes you to it" width="760">
 

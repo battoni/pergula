@@ -87,10 +87,10 @@ FALLBACK_WINDOW = 2 * 3600
 
 # The registry knows busy and idle, which cannot tell "waiting for you to approve
 # something" from "working". The tab-status hooks (~/.claude/tab-status) write
-# one file per session id with four states, the same four the terminal tab titles
+# one file per session id with five states, the same five the terminal tab titles
 # show. A session they never saw falls back to the registry's two.
 AGENT_STATE_PATH = Path.home() / ".claude" / "tab-status" / "sessions"
-AGENT_STATES = {"working", "needs_you", "ready", "error"}
+AGENT_STATES = {"working", "needs_you", "ready", "error", "waiting"}
 SESSION_ID = re.compile(r"[\w-]+")
 
 # Holding the Mac awake. An agent left working stops when the machine sleeps,
@@ -450,6 +450,13 @@ def agent_state(session: str, status: str) -> str:
     interrupted = state == "working" and status == "idle" and not subagents_behind(record)
     if interrupted:
         return "ready"
+
+    # waiting is written when the turn ends with a shell still running. The
+    # shell finishing wakes the agent with no prompt and no hook, so a busy
+    # registry means it is already working on the result.
+    woke = state == "waiting" and status == "busy"
+    if woke:
+        return "working"
 
     return state
 
@@ -1243,9 +1250,10 @@ PAGE = r"""<!doctype html>
        the text it scrolls. It lights to --accent under the pointer. */
     --scroll-rest: #6d8214;
 
-    /* What an open agent is doing: the same four colours as the emoji the
+    /* What an open agent is doing: the same five colours as the emoji the
        tab-status hooks put in the terminal tab title. */
     --state-working: #6fa8d6;
+    --state-waiting: #a98bd6;
     --state-needs-you: #f0a03c;
     --state-ready: #85b06b;
     --state-error: #e06c62;
@@ -1595,6 +1603,7 @@ PAGE = r"""<!doctype html>
   .session.live .when { color: var(--accent); }
   .session .when .light { color: var(--state-ready); }
   .session.working .when .light { color: var(--state-working); }
+  .session.waiting .when, .session.waiting .when .light { color: var(--state-waiting); }
   .session.needs-you .when, .session.needs-you .when .light { color: var(--state-needs-you); font-weight: 600; }
   .session.error .when, .session.error .when .light { color: var(--state-error); font-weight: 600; }
 
@@ -2041,7 +2050,7 @@ const STRINGS = {
     autoName: '(nome automático)',
     stateWorking: 'trabalhando', stateNeedsYou: 'precisa de você',
     subagentOne: '1 subagente', subagentMany: '{n} subagentes',
-    stateReady: 'pronto', stateError: 'erro',
+    stateReady: 'pronto', stateError: 'erro', stateWaiting: 'esperando o shell',
     renameHint: 'renomear projeto (vazio volta ao caminho)',
     now: 'agora', month: 'mes',
     nothingFound: 'nada encontrado',
@@ -2099,7 +2108,7 @@ const STRINGS = {
     autoName: '(automatic name)',
     stateWorking: 'working', stateNeedsYou: 'needs you',
     subagentOne: '1 agent', subagentMany: '{n} agents',
-    stateReady: 'ready', stateError: 'error',
+    stateReady: 'ready', stateError: 'error', stateWaiting: 'waiting on a shell',
     renameHint: 'rename project (empty restores the path)',
     now: 'now', month: 'mo',
     nothingFound: 'nothing found',
@@ -2694,6 +2703,8 @@ function stateLabel(state) {
 
   if (state === 'working') return t('stateWorking');
 
+  if (state === 'waiting') return t('stateWaiting');
+
   return t('stateReady');
 }
 
@@ -2721,9 +2732,12 @@ function drawAttention() {
 }
 
 // What sits where the time would: what the session is waiting on, or how many
-// subagents are still working once the main turn has ended, or how long ago.
+// subagents are still working once the main turn has ended, that it is waiting
+// on a shell, or how long ago.
 function whenLabel(meta) {
   if (needsAttention(meta)) return stateLabel(meta.state);
+
+  if (meta.live && meta.state === 'waiting') return stateLabel(meta.state);
 
   const behind = meta.live && meta.subagents;
   if (!behind) return ago(meta.mtime);
