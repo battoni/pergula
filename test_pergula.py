@@ -703,6 +703,62 @@ class UsageCounting(TempUsage):
         self.assertIsNone(pergula.leaf_cost("claude-unknown-9", leaf))
 
 
+class UsageCopies(TempUsage):
+    """The CLI copies history between files; a copy is not another response."""
+
+    def calls_by_session(self):
+        found = {}
+        for _hour, _project, session, _model, kind, leaf in self.leaves():
+            found[(session, kind)] = found.get((session, kind), 0) + leaf["calls"]
+        return found
+
+    def test_a_fork_does_not_count_its_parents_history_again(self):
+        self.write("s.jsonl", reply("msg_1", "2026-11-02T12:00:00.000Z"))
+        self.write("s/subagents/agent-a.jsonl", reply("msg_1", "2026-11-02T12:00:00.000Z"),
+                   reply("msg_9", "2026-11-02T12:02:00.000Z"))
+
+        self.assertEqual(self.calls_by_session(), {("s", "main"): 1, ("s", "sub"): 1})
+
+    def test_a_copy_written_after_the_original_was_counted_is_skipped(self):
+        self.write("s.jsonl", reply("msg_1", "2026-11-02T12:00:00.000Z"))
+        self.state()
+
+        self.write("s/subagents/agent-a.jsonl", reply("msg_1", "2026-11-02T12:00:00.000Z"))
+        self.assertEqual(self.total(), 1)
+
+    def test_a_continued_session_leaves_the_copied_history_where_it_was_made(self):
+        # Named so that the alphabet puts the newer file first.
+        old = self.write("b-old.jsonl", reply("msg_1", "2026-11-02T12:00:00.000Z"))
+        os.utime(old, (1_700_000_000, 1_700_000_000))
+        self.write("a-new.jsonl", reply("msg_1", "2026-11-02T12:00:00.000Z"),
+                   reply("msg_2", "2026-11-02T13:00:00.000Z"))
+
+        self.assertEqual(self.calls_by_session(), {("b-old", "main"): 1, ("a-new", "main"): 1})
+
+    def test_the_output_is_what_the_last_line_reports(self):
+        self.write("s.jsonl", reply("msg_1", "2026-11-02T12:00:00.000Z", tokens=(10, 1000, 100, 10)),
+                   reply("msg_1", "2026-11-02T12:00:00.000Z", tokens=(10, 1000, 100, 257)))
+
+        self.assertEqual((self.total(), self.total("output")), (1, 257))
+
+    def test_the_rest_of_the_output_arrives_in_the_next_read(self):
+        self.write("s.jsonl", reply("msg_1", "2026-11-02T12:00:00.000Z", tokens=(10, 1000, 100, 10)))
+        self.state()
+
+        self.write("s.jsonl", reply("msg_1", "2026-11-02T12:00:00.000Z", tokens=(10, 1000, 100, 257)))
+        self.assertEqual((self.total(), self.total("output"), self.total("cache_read")), (1, 257, 1000))
+
+    def test_ids_no_transcript_can_hold_are_forgotten(self):
+        self.write("s.jsonl", reply("msg_1", "2020-01-01T12:00:00.000Z"),
+                   reply("msg_2", "2026-11-02T12:00:00.000Z"))
+        today = datetime.now().strftime("%Y-%m-%d")
+        self.write("t.jsonl", reply("msg_3", today + "T12:00:00.000Z"))
+
+        seen = self.state()["seen"]
+        self.assertNotIn("2020-01-01", seen)
+        self.assertIn("msg_3", seen[today])
+
+
 class UsageClock(TempUsage):
     """A day is a local day, and the week turns when the quota does."""
 
@@ -746,6 +802,14 @@ class UsageClock(TempUsage):
         self.assertEqual(report["totals"]["calls"], 2)
         self.assertEqual(pergula.load_usage()["settings"]["quota_reset"], {"weekday": "sat", "hour": 12})
 
+    def test_true_is_not_an_hour(self):
+        state = {"settings": {"quota_reset": {"weekday": "sat", "hour": True}}}
+
+        self.assertEqual(pergula.quota_reset(state), pergula.QUOTA_RESET)
+        self.assertFalse(pergula.valid_quota_reset("sat", True))
+        self.assertFalse(pergula.valid_quota_reset("sat", "14"))
+        self.assertFalse(pergula.valid_quota_reset("sat", 24))
+
     def test_the_bars_of_a_month_are_its_days(self):
         window = pergula.usage_window("month", "2026-11-15T10", "", pergula.QUOTA_RESET)
 
@@ -775,6 +839,17 @@ class UsageProjects(TempUsage):
 
         projects = {project for _h, project, *_rest in self.leaves()}
         self.assertEqual(projects, {str(main)})
+
+    def test_a_transcript_that_opens_without_a_directory_finds_it_later(self):
+        repo = (self.dir / "my.repo").resolve()
+        repo.mkdir()
+        folder = pergula.PROJECTS / pergula.project_slug(repo)
+        self.write("s.jsonl", json.dumps({"type": "mode", "mode": "default"}) + "\n", folder=folder)
+        self.state()
+
+        self.write("s.jsonl", reply("msg_1", "2026-11-02T12:00:00.000Z", cwd=str(repo)), folder=folder)
+        projects = {project for _h, project, *_rest in self.leaves()}
+        self.assertEqual(projects, {str(repo)})
 
     def test_a_folder_whose_directory_is_gone_keeps_its_last_answer(self):
         folders = {"-gone": "/somewhere/repo"}
@@ -849,6 +924,23 @@ class UsageSummary(TempUsage):
         self.write("s.jsonl", reply("msg_1", "2026-11-02T12:00:00.000Z"))
 
         self.assertEqual(self.total(), 1)
+
+    def test_a_first_version_summary_keeps_only_what_cannot_be_read_again(self):
+        def leaf(calls):
+            return {"claude-opus-5-5": {"main": {**dict.fromkeys(pergula.LEAF_FIELDS, 0), "calls": calls}}}
+
+        pergula.USAGE_PATH.write_text(json.dumps({
+            "version": 1, "settings": {}, "files": {"x": {"offset": 9}}, "folders": {}, "titles": {},
+            "hours": {"2026-09-01T10": {"/old": {"gone": leaf(5)}},
+                      "2026-11-02T09": {"/work/app": {"s": leaf(7)}}},
+            "versions": {"2026-09-01": {"2.0": 5}, "2026-11-02": {"2.1": 7}},
+        }))
+        self.write("s.jsonl", reply("msg_1", "2026-11-02T12:00:00.000Z"))
+
+        state = self.state()
+        self.assertEqual(self.total(), 6)
+        self.assertEqual(state["version"], pergula.USAGE_VERSION)
+        self.assertEqual(state["versions"], {"2026-09-01": {"2.0": 5}, "2026-11-02": {"2.1": 1}})
 
     def test_the_report_answers_with_nothing_indexed(self):
         report = pergula.usage_report(pergula.fresh_usage(), "week", "", set())
