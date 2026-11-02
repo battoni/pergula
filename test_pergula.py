@@ -25,7 +25,7 @@ import time
 import unittest
 import unittest.mock
 import xml.etree.ElementTree as ElementTree
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -748,15 +748,51 @@ class UsageCopies(TempUsage):
         self.write("s.jsonl", reply("msg_1", "2026-11-02T12:00:00.000Z", tokens=(10, 1000, 100, 257)))
         self.assertEqual((self.total(), self.total("output"), self.total("cache_read")), (1, 257, 1000))
 
-    def test_ids_no_transcript_can_hold_are_forgotten(self):
-        self.write("s.jsonl", reply("msg_1", "2020-01-01T12:00:00.000Z"),
-                   reply("msg_2", "2026-11-02T12:00:00.000Z"))
+    def test_a_day_no_transcript_holds_is_forgotten(self):
+        old = self.write("s.jsonl", reply("msg_1", "2020-01-01T12:00:00.000Z"))
         today = datetime.now().strftime("%Y-%m-%d")
         self.write("t.jsonl", reply("msg_3", today + "T12:00:00.000Z"))
+        self.assertIn("2020-01-01", self.state()["seen"])
 
+        old.unlink()
         seen = self.state()["seen"]
         self.assertNotIn("2020-01-01", seen)
         self.assertIn("msg_3", seen[today])
+
+    def test_a_fork_of_a_long_session_does_not_count_its_old_history(self):
+        # The CLI deletes by when a file was last written, so a living session
+        # can hold responses older than any cleanup.
+        long_ago = (datetime.now(timezone.utc) - timedelta(days=40)).strftime("%Y-%m-%dT12:00:00.000Z")
+        recent = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT12:00:00.000Z")
+        history = (reply("msg_1", long_ago), reply("msg_2", recent))
+        self.write("s.jsonl", *history)
+        self.state()
+
+        self.write("s/subagents/agent-a.jsonl", *history, reply("msg_3", recent))
+        self.assertEqual(self.total(), 3)
+
+    def test_a_response_that_crosses_midnight_counts_once(self):
+        # 02:59:52 and 03:00:10 UTC are either side of midnight in São Paulo.
+        self.write("s.jsonl", reply("msg_1", "2026-11-02T02:59:52.000Z", tokens=(10, 1000, 100, 10)),
+                   reply("msg_1", "2026-11-02T03:00:10.000Z", tokens=(10, 1000, 100, 257)))
+
+        sums = [(hour, leaf["calls"], leaf["output"]) for hour, *_rest, leaf in self.leaves()]
+        self.assertEqual(sums, [("2026-11-01T23", 1, 257)])
+
+    def test_the_rest_of_the_output_stays_in_the_hour_of_the_call(self):
+        self.write("s.jsonl", reply("msg_1", "2026-11-02T12:59:50.000Z", tokens=(10, 1000, 100, 10)),
+                   reply("msg_1", "2026-11-02T13:00:10.000Z", tokens=(10, 1000, 100, 257)))
+
+        sums = [(hour, leaf["calls"], leaf["output"]) for hour, *_rest, leaf in self.leaves()]
+        self.assertEqual(sums, [("2026-11-02T09", 1, 257)])
+
+    def test_a_continued_session_has_no_base_of_its_own(self):
+        old = self.write("b-old.jsonl", reply("msg_1", "2026-11-02T12:00:00.000Z"))
+        os.utime(old, (1_700_000_000, 1_700_000_000))
+        self.write("a-new.jsonl", reply("msg_1", "2026-11-02T12:00:00.000Z"),
+                   reply("msg_2", "2026-11-02T13:00:00.000Z", tokens=(10, 150000, 100, 50)))
+
+        self.assertEqual((self.total("starts"), self.total("first_ctx")), (1, 1110))
 
 
 class UsageClock(TempUsage):
