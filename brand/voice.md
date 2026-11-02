@@ -28,6 +28,9 @@ and defaulting to the browser's language. Every string, in both:
 | `no session open in a terminal` | `nenhuma sessão aberta no terminal` |
 | `no session in the last 2 hours` | `nenhuma sessão nas últimas 2 horas` |
 | `↓ new messages` | `↓ novas mensagens` |
+| `each response counted once` | `cada resposta contada uma vez` |
+| `no data before 4 oct 2026` | `sem dados antes de 4 out 2026` |
+| `indexing… 41%` | `indexando… 41%` |
 
 A new string is not done until it exists in both. The keys live in `STRINGS` at
 the top of the page script; `paintLang()` repaints everything that carries text.

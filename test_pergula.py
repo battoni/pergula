@@ -25,6 +25,7 @@ import time
 import unittest
 import unittest.mock
 import xml.etree.ElementTree as ElementTree
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -558,6 +559,319 @@ class AgentState(unittest.TestCase):
         waiting = {"abc-1": {"status": "busy", "state": "needs_you"}}
 
         self.assertNotEqual(pergula.live_stamp(quiet), pergula.live_stamp(waiting))
+
+
+def reply(key, stamp, model="claude-opus-5-5", tokens=(10, 1000, 100, 50), version="2.1.5",
+          cwd="/nowhere"):
+    """One assistant line with usage, in the shape the CLI writes. The CLI
+    repeats a response over several lines, so callers write it more than once."""
+    given, read, written, out = tokens
+    body = {
+        "type": "assistant", "timestamp": stamp, "version": version, "cwd": cwd,
+        "message": {"id": key, "model": model, "role": "assistant", "content": [],
+                    "usage": {"input_tokens": given, "cache_read_input_tokens": read,
+                              "cache_creation_input_tokens": written, "output_tokens": out}},
+    }
+    return json.dumps(body) + "\n"
+
+
+class TempUsage(unittest.TestCase):
+    """A private ~/.claude: transcripts, summary and clock."""
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.saved = (pergula.PROJECTS, pergula.USAGE_PATH, os.environ.get("TZ"))
+        pergula.PROJECTS = self.dir / "projects"
+        pergula.USAGE_PATH = self.dir / "usage.json"
+        pergula._USAGE.update(state=None, done=0, total=0, ready=False)
+        pergula._ROOTS.clear()
+        pergula._META_CACHE.clear()
+        os.environ["TZ"] = "America/Sao_Paulo"
+        time.tzset()
+        self.folder = pergula.PROJECTS / "-work-app"
+        self.folder.mkdir(parents=True)
+
+    def tearDown(self):
+        pergula.PROJECTS, pergula.USAGE_PATH, zone = self.saved
+        pergula._USAGE.update(state=None, done=0, total=0, ready=False)
+        if zone is None:
+            os.environ.pop("TZ", None)
+        if zone is not None:
+            os.environ["TZ"] = zone
+        time.tzset()
+
+    def write(self, name, *lines, folder=None):
+        path = (folder or self.folder) / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a") as handle:
+            handle.write("".join(lines))
+        return path
+
+    def state(self):
+        pergula.index_usage()
+        return pergula._USAGE["state"]
+
+    def leaves(self):
+        return list(pergula.walk_leaves(self.state(), "", "~"))
+
+    def total(self, field="calls"):
+        return sum(leaf[field] for *_rest, leaf in self.leaves())
+
+
+class UsageCounting(TempUsage):
+    """Every failure here inflates or deflates the panel without a sound."""
+
+    def test_a_response_written_over_three_lines_counts_once(self):
+        self.write("s.jsonl", *[reply("msg_1", "2026-11-02T12:00:00.000Z")] * 3)
+
+        self.assertEqual(self.total(), 1)
+        self.assertEqual(self.total("cache_read"), 1000)
+
+    def test_two_responses_count_twice(self):
+        self.write("s.jsonl", reply("msg_1", "2026-11-02T12:00:00.000Z"),
+                   reply("msg_2", "2026-11-02T12:01:00.000Z"))
+
+        self.assertEqual(self.total(), 2)
+
+    def test_appending_adds_only_what_is_new(self):
+        self.write("s.jsonl", reply("msg_1", "2026-11-02T12:00:00.000Z"))
+        self.assertEqual(self.total(), 1)
+
+        self.write("s.jsonl", reply("msg_2", "2026-11-02T12:05:00.000Z"))
+        self.assertEqual(self.total(), 2)
+
+    def test_a_response_cut_in_two_by_a_read_is_not_counted_again(self):
+        self.write("s.jsonl", reply("msg_1", "2026-11-02T12:00:00.000Z"))
+        self.state()
+
+        self.write("s.jsonl", reply("msg_1", "2026-11-02T12:00:00.000Z"),
+                   reply("msg_2", "2026-11-02T12:05:00.000Z"))
+        self.assertEqual(self.total(), 2)
+
+    def test_the_ids_survive_a_restart(self):
+        self.write("s.jsonl", reply("msg_1", "2026-11-02T12:00:00.000Z"))
+        self.state()
+        pergula._USAGE["state"] = None
+
+        self.write("s.jsonl", reply("msg_1", "2026-11-02T12:00:00.000Z"))
+        self.assertEqual(self.total(), 1)
+
+    def test_half_a_line_waits_for_the_rest(self):
+        line = reply("msg_1", "2026-11-02T12:00:00.000Z")
+        self.write("s.jsonl", line[:40])
+        self.assertEqual(self.total(), 0)
+
+        self.write("s.jsonl", line[40:])
+        self.assertEqual(self.total(), 1)
+
+    def test_an_unchanged_pass_changes_nothing(self):
+        self.write("s.jsonl", reply("msg_1", "2026-11-02T12:00:00.000Z"))
+        self.state()
+        self.state()
+
+        self.assertEqual(self.total(), 1)
+
+    def test_a_subagent_counts_in_the_session_that_started_it(self):
+        self.write("s.jsonl", reply("msg_1", "2026-11-02T12:00:00.000Z"))
+        self.write("s/subagents/agent-a.jsonl", reply("msg_9", "2026-11-02T12:02:00.000Z"))
+
+        kinds = {(session, kind) for _h, _p, session, _m, kind, _l in self.leaves()}
+        self.assertEqual(kinds, {("s", "main"), ("s", "sub")})
+
+    def test_the_first_call_is_the_base(self):
+        self.write("s.jsonl", reply("msg_1", "2026-11-02T12:00:00.000Z", tokens=(1, 50000, 0, 9)),
+                   reply("msg_2", "2026-11-02T12:01:00.000Z", tokens=(1, 90000, 0, 9)))
+
+        leaf = self.leaves()[0][-1]
+        self.assertEqual((leaf["starts"], leaf["first_ctx"]), (1, 50001))
+
+    def test_a_long_call_is_counted_as_one(self):
+        self.write("s.jsonl", reply("msg_1", "2026-11-02T12:00:00.000Z", tokens=(1, 250000, 0, 9)),
+                   reply("msg_2", "2026-11-02T12:01:00.000Z", tokens=(1, 9000, 0, 9)))
+
+        self.assertEqual(self.total("ctx_over_200k"), 1)
+
+    def test_a_synthetic_reply_costs_nothing_and_is_not_a_call(self):
+        self.write("s.jsonl", reply("msg_1", "2026-11-02T12:00:00.000Z", model="<synthetic>"))
+
+        self.assertEqual(self.total(), 0)
+
+    def test_the_dollars_follow_the_table(self):
+        leaf = {"input": 1_000_000, "cache_read": 0, "cache_write": 0, "output": 1_000_000}
+
+        self.assertAlmostEqual(pergula.leaf_cost("claude-opus-5-5", leaf), 24.0)
+        self.assertIsNone(pergula.leaf_cost("claude-unknown-9", leaf))
+
+
+class UsageClock(TempUsage):
+    """A day is a local day, and the week turns when the quota does."""
+
+    def test_the_day_is_cut_in_local_time(self):
+        self.write("s.jsonl", reply("msg_1", "2026-11-02T01:30:00.000Z"))
+
+        self.assertEqual(self.leaves()[0][0], "2026-11-01T22")
+
+    def test_the_week_starts_on_saturday_at_two(self):
+        reset = pergula.QUOTA_RESET
+        before = pergula.quota_week_start(datetime(2026, 10, 31, 13, 59), reset)
+        after = pergula.quota_week_start(datetime(2026, 10, 31, 14, 0), reset)
+
+        self.assertEqual(before, datetime(2026, 10, 24, 14))
+        self.assertEqual(after, datetime(2026, 10, 31, 14))
+
+    def test_another_setting_moves_the_cut(self):
+        reset = {"weekday": "mon", "hour": 9}
+
+        self.assertEqual(pergula.quota_week_start(datetime(2026, 10, 31, 15), reset),
+                         datetime(2026, 10, 26, 9))
+
+    def test_calls_either_side_of_the_turn_land_in_different_weeks(self):
+        # 16:30 and 17:30 UTC are 13:30 and 14:30 in São Paulo, on a Saturday.
+        self.write("s.jsonl", reply("msg_1", "2026-10-31T16:30:00.000Z"),
+                   reply("msg_2", "2026-10-31T17:30:00.000Z"))
+        state = self.state()
+
+        late = pergula.usage_report(state, "week", "2026-10-31T15", set())
+        early = pergula.usage_report(state, "week", "2026-10-31T13", set())
+        self.assertEqual((late["totals"]["calls"], early["totals"]["calls"]), (1, 1))
+        self.assertEqual(late["start"], "2026-10-31T14")
+
+    def test_the_setting_is_saved_and_moves_the_report(self):
+        self.write("s.jsonl", reply("msg_1", "2026-10-31T16:30:00.000Z"),
+                   reply("msg_2", "2026-10-31T17:30:00.000Z"))
+        self.state()
+        pergula.set_quota_reset("sat", 12)
+
+        report = pergula.usage_report(pergula._USAGE["state"], "week", "2026-10-31T15", set())
+        self.assertEqual(report["totals"]["calls"], 2)
+        self.assertEqual(pergula.load_usage()["settings"]["quota_reset"], {"weekday": "sat", "hour": 12})
+
+    def test_the_bars_of_a_month_are_its_days(self):
+        window = pergula.usage_window("month", "2026-11-15T10", "", pergula.QUOTA_RESET)
+
+        self.assertEqual(len(window["bars"]), 30)
+        self.assertEqual((window["start"], window["end"]), ("2026-11-01T00", "2026-12-01T00"))
+
+
+class UsageProjects(TempUsage):
+    """Projects are repositories, and a worktree is its repository's."""
+
+    def git(self, *arguments, where):
+        import subprocess
+        subprocess.run(["git", "-C", str(where), *arguments], check=True, capture_output=True)
+
+    def test_a_worktree_is_summed_in_the_main_repository(self):
+        main = (self.dir / "repo").resolve()
+        main.mkdir()
+        self.git("init", "-q", where=main)
+        self.git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty",
+                 "-m", "first", where=main)
+        tree = (self.dir / "tree").resolve()
+        self.git("worktree", "add", "-q", str(tree), where=main)
+
+        for path, key in ((main, "msg_1"), (tree, "msg_2")):
+            folder = pergula.PROJECTS / pergula.project_slug(path)
+            self.write("s.jsonl", reply(key, "2026-11-02T12:00:00.000Z", cwd=str(path)), folder=folder)
+
+        projects = {project for _h, project, *_rest in self.leaves()}
+        self.assertEqual(projects, {str(main)})
+
+    def test_a_folder_whose_directory_is_gone_keeps_its_last_answer(self):
+        folders = {"-gone": "/somewhere/repo"}
+
+        self.assertEqual(pergula.project_of("-gone", ("/does/not/exist", True), folders), "/somewhere/repo")
+
+    def test_a_folder_never_answered_falls_back_to_its_name(self):
+        self.assertEqual(pergula.project_of("-does-not-exist", ("", False), {}), "/does/not/exist")
+
+
+class UsageMilestones(unittest.TestCase):
+    def state(self, days):
+        state = pergula.fresh_usage()
+        for day, model, version in days:
+            call = {"hour": f"{day}T10", "model": model, "version": version, "input": 1,
+                    "cache_read": 0, "cache_write": 0, "cache_write_1h": 0, "output": 1}
+            pergula.add_call(state, "/p", "s", "main", call, False)
+        return state
+
+    def test_a_new_leading_model_is_marked(self):
+        found = pergula.detect_milestones(self.state([
+            ("2026-10-20", "claude-sonnet-5-5", "2.1"),
+            ("2026-10-21", "claude-opus-5-5", "2.1"),
+        ]))
+
+        self.assertEqual(found, [{"day": "2026-10-21", "kind": "model", "label": "opus 5.5"}])
+
+    def test_a_patch_release_is_not_marked(self):
+        found = pergula.detect_milestones(self.state([
+            ("2026-10-20", "claude-opus-5-5", pergula.minor_version("2.1.290")),
+            ("2026-10-21", "claude-opus-5-5", pergula.minor_version("2.1.296")),
+        ]))
+
+        self.assertEqual(found, [])
+
+    def test_a_minor_release_is_marked(self):
+        found = pergula.detect_milestones(self.state([
+            ("2026-10-20", "claude-opus-5-5", "2.1"),
+            ("2026-10-21", "claude-opus-5-5", "2.2"),
+        ]))
+
+        self.assertEqual(found, [{"day": "2026-10-21", "kind": "version", "label": "claude code 2.2"}])
+
+
+class UsageSummary(TempUsage):
+    """The summary outlives the transcripts, so losing it costs months."""
+
+    def test_the_summary_is_written_whole(self):
+        self.write("s.jsonl", reply("msg_1", "2026-11-02T12:00:00.000Z"))
+        self.state()
+
+        saved = json.loads(pergula.USAGE_PATH.read_text())
+        self.assertEqual(saved["version"], pergula.USAGE_VERSION)
+        self.assertFalse(pergula.USAGE_PATH.with_name("usage.json.tmp").exists())
+
+    def test_history_outlives_a_deleted_transcript(self):
+        path = self.write("s.jsonl", reply("msg_1", "2026-11-02T12:00:00.000Z"))
+        self.state()
+        path.unlink()
+
+        self.assertEqual(self.total(), 1)
+
+    def test_a_broken_summary_is_rebuilt_and_set_aside(self):
+        pergula.USAGE_PATH.write_text("{{{")
+        self.write("s.jsonl", reply("msg_1", "2026-11-02T12:00:00.000Z"))
+
+        self.assertEqual(self.total(), 1)
+        self.assertEqual(pergula.USAGE_PATH.with_name("usage.json.broken").read_text(), "{{{")
+
+    def test_a_summary_of_the_wrong_shape_is_rebuilt(self):
+        pergula.USAGE_PATH.write_text(json.dumps({"version": pergula.USAGE_VERSION, "hours": []}))
+        self.write("s.jsonl", reply("msg_1", "2026-11-02T12:00:00.000Z"))
+
+        self.assertEqual(self.total(), 1)
+
+    def test_the_report_answers_with_nothing_indexed(self):
+        report = pergula.usage_report(pergula.fresh_usage(), "week", "", set())
+
+        self.assertEqual(report["totals"]["calls"], 0)
+        self.assertEqual(report["prev"], "")
+
+    def test_a_project_switched_off_leaves_the_totals(self):
+        self.write("s.jsonl", reply("msg_1", "2026-11-02T12:00:00.000Z"))
+        state = self.state()
+        project = self.leaves()[0][1]
+
+        report = pergula.usage_report(state, "day", "2026-11-02T09", {project})
+        self.assertEqual(report["totals"]["calls"], 0)
+        self.assertEqual(report["projects"][0]["calls"], 1)
+
+    def test_a_session_keeps_its_title(self):
+        self.write("s.jsonl", record("fix the login"), reply("msg_1", "2026-11-02T12:00:00.000Z"))
+        state = self.state()
+        project = self.leaves()[0][1]
+
+        found = pergula.usage_sessions(state, "day", "2026-11-02T09", project)
+        self.assertEqual(found["sessions"][0]["title"], "fix the login")
 
 
 class Translations(unittest.TestCase):

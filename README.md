@@ -198,6 +198,42 @@ Clicking it again lets the Mac sleep. So does the deadline running out, and so
 does `make deploy`, which restarts the agent and takes the child process with it.
 There is no way to leave it on by accident and no way to leave it on forever.
 
+## What it costs
+
+The **usage** tab adds up the tokens of every transcript, by project and by
+day, week, month, year or any range of dates. There is no model involved: it
+reads the files and sums them, the way the sidebar already reads them to list
+the sessions.
+
+Each response counts once. The CLI writes a response over several lines that
+repeat its `message.id` and its `usage`; adding up lines instead of responses
+is how a total comes out roughly twice the truth.
+
+- **The week is the quota's.** It runs from Saturday 14:00 to Saturday 14:00,
+  local time, and the day and hour are a setting at the bottom of the sidebar.
+  Months and years go by local calendar days.
+- **Four numbers and three indicators.** Tokens, cache read, cache write and
+  output, and an *≈ api equivalent* in dollars from a dated table of list
+  prices — the subscription is not billed by the token, so read it as a scale.
+  Then the average context per call, the share of calls above 200k, and the
+  session base: the context of each session's first call, which is what the
+  rules, the tools and the system prompt cost before any work is done.
+- **A project is a repository.** A worktree is summed in its main checkout,
+  resolved by `git rev-parse --git-common-dir`; a subagent is summed in the
+  session that started it. Every folder under `~/.claude/projects` counts.
+- **Milestones mark themselves.** A day whose most-used model, or whose Claude
+  Code version `x.y`, differs from the day before draws a line across the chart.
+  A patch release does not.
+- **History outlives the transcripts.** The CLI deletes them after thirty days;
+  the sums live in `~/.claude/pergula-usage.json`, by hour, project, session,
+  model and main agent or subagent, and keep growing. Only what a transcript
+  added since the last read is read, so after the first pass — a few seconds per
+  gigabyte, in the background — a pass takes milliseconds.
+
+Clicking a project lists its sessions with what each cost, how many subagents
+it started and the largest context it reached, and opens any whose transcript
+still exists in the reader.
+
 ## The name
 
 *Pergula* is Latin for the light frame of beams that throws a roof out from the
@@ -213,9 +249,10 @@ nothing indoors — it only gives you somewhere to sit and look back.
 It never writes a byte back to a transcript, and never sends one anywhere. It
 reads them.
 
-The only things it writes are yours: project nicknames, the snippet library and
-the caffeinate deadline, all plain files under `~/.claude/`, all readable,
-editable and deletable without this program.
+The only things it writes are yours: project nicknames, the snippet library, the
+caffeinate deadline and the usage summary, all plain files under `~/.claude/`,
+all readable, editable and deletable without this program. To see which
+repository a project folder belongs to it runs `git rev-parse`, which reads.
 
 Nothing leaves the machine — no account, no sync, no telemetry, no network call
 of any kind. Even the Claude mark in the interface is drawn in JavaScript rather
