@@ -121,7 +121,7 @@ A turn that ends waiting on a shell it started (a CI watch, a build) turns
 purple, **waiting on a shell**, until the shell finishes and the agent wakes;
 shells that never finish on their own, like a dev server, do not count.
 
-<img src="docs/states.svg" alt="An agent turns to needs you, the window title counts it, and a click takes you to it" width="760">
+<img src="docs/states.svg" alt="An agent turns to needs you, the window title counts it, and a click takes you to it; another waits on a shell until it finishes" width="760">
 
 Whatever you are reading stays on the list regardless, so it never vanishes under
 you mid-sentence. The page never scrolls itself while text is selected.
@@ -205,6 +205,8 @@ day, week, month, year or any range of dates. There is no model involved: it
 reads the files and sums them, the way the sidebar already reads them to list
 the sessions.
 
+<img src="docs/usage.svg" alt="A week of tokens by project, then a month, then the month before with its milestones, then one project's sessions" width="760">
+
 Each response counts once. The CLI writes a response over several lines that
 repeat its `message.id`, and copies whole stretches of history into other
 files: a continued session starts with the one it continues, a forked subagent
@@ -213,6 +215,8 @@ total comes out roughly twice the truth. So the ids already counted are kept,
 across every file, for as long as a transcript holding them can exist, and a
 copy counts where the response was made. The output is the last line's: the
 first carries only the opening tokens of it.
+
+<img src="docs/once.svg" alt="Nine lines across a session, the session that continues it and a fork of it: adding up lines counts nine calls, pergula counts four" width="760">
 
 - **The week is the quota's.** It runs from Saturday 14:00 to Saturday 14:00,
   local time, and the day and hour are a setting at the bottom of the sidebar.

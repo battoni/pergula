@@ -373,9 +373,9 @@
     <div class="copy">
       <p class="eyebrow">At a glance</p>
       <h3>Know which agent is waiting on you</h3>
-      <p>Every open agent carries a light: working, ready, <b>needs you</b> or error. The ones waiting on a permission or a question are counted in the window title and on the Dock icon, so the one that stopped to ask does not sit there for minutes.</p>
+      <p>Every open agent carries a light: working, waiting on a shell, ready, <b>needs you</b> or error. The ones waiting on a permission or a question are counted in the window title and on the Dock icon, so the one that stopped to ask does not sit there for minutes.</p>
     </div>
-    <img src="states.svg" alt="An agent turns to needs you, the window title counts it, and a click takes you to it" loading="lazy">
+    <img src="states.svg" alt="An agent turns to needs you, the window title counts it, and a click takes you to it; another waits on a shell until it finishes" loading="lazy">
   </article>
 
   <article class="feature">
@@ -412,6 +412,24 @@
       <p>One, two, four or eight hours of <code>caffeinate</code> from the window that is already open, with the time left on the button. A restart cleans up after itself; nothing is left on by accident.</p>
     </div>
     <img src="awake.svg" alt="keep awake, two hours: the countdown runs in the sidebar while the agent finishes its work" loading="lazy">
+  </article>
+
+  <article class="feature">
+    <div class="copy">
+      <p class="eyebrow">Usage</p>
+      <h3>What each project costs, by the quota's week</h3>
+      <p>Tokens by project and by day, week, month, year or any dates, with the week turning when the quota does. An <b>≈&nbsp;api equivalent</b> in dollars, the average context, the calls over 200k, and a line across the chart when the model or the Claude Code version changed. The sums outlive the CLI's thirty-day cleanup.</p>
+    </div>
+    <img src="usage.svg" alt="A week of tokens by project, then a month, then the month before with its milestones, then one project's sessions" loading="lazy">
+  </article>
+
+  <article class="feature">
+    <div class="copy">
+      <p class="eyebrow">Honest totals</p>
+      <h3>Each response counted once</h3>
+      <p>The CLI writes a response over several lines and copies history into continued sessions and forked subagents. Adding up lines counts the same work two or three times; pergula counts each response once, where it was made, with the output its last line reports.</p>
+    </div>
+    <img src="once.svg" alt="Nine lines across a session, the session that continues it and a fork of it: adding up lines counts nine calls, pergula counts four" loading="lazy">
   </article>
 </section>
 

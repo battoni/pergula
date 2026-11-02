@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 422" width="760" height="422" role="img" aria-labelledby="title desc">
+  <title id="title">Each response counted once</title>
+  <desc id="desc">Nine lines across a session, the session that continues it and a fork of it hold four responses: adding up lines counts nine calls, pergula counts four, with the output of each one's last line.</desc>
+
+  <!-- Colours are the :root tokens in pergula. The projects and sessions are made up. -->
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .ripple { transform-box: fill-box; transform-origin: center; }
+    .l1 { animation: l1 14s ease-out infinite; }
+    @keyframes l1 { 0%, 6.0% { opacity: 0; transform: translateX(-6px); } 8.0%, 94% { opacity: 1; transform: translateX(0); } 98%, 100% { opacity: 0; transform: translateX(0); } }
+    .l2 { animation: l2 14s ease-out infinite; }
+    @keyframes l2 { 0%, 13.6% { opacity: 0; transform: translateX(-6px); } 15.6%, 94% { opacity: 1; transform: translateX(0); } 98%, 100% { opacity: 0; transform: translateX(0); } }
+    .l3 { animation: l3 14s ease-out infinite; }
+    @keyframes l3 { 0%, 21.1% { opacity: 0; transform: translateX(-6px); } 23.1%, 94% { opacity: 1; transform: translateX(0); } 98%, 100% { opacity: 0; transform: translateX(0); } }
+    .l4 { animation: l4 14s ease-out infinite; }
+    @keyframes l4 { 0%, 28.7% { opacity: 0; transform: translateX(-6px); } 30.7%, 94% { opacity: 1; transform: translateX(0); } 98%, 100% { opacity: 0; transform: translateX(0); } }
+    .l5 { animation: l5 14s ease-out infinite; }
+    @keyframes l5 { 0%, 36.2% { opacity: 0; transform: translateX(-6px); } 38.2%, 94% { opacity: 1; transform: translateX(0); } 98%, 100% { opacity: 0; transform: translateX(0); } }
+    .l6 { animation: l6 14s ease-out infinite; }
+    @keyframes l6 { 0%, 43.8% { opacity: 0; transform: translateX(-6px); } 45.8%, 94% { opacity: 1; transform: translateX(0); } 98%, 100% { opacity: 0; transform: translateX(0); } }
+    .l7 { animation: l7 14s ease-out infinite; }
+    @keyframes l7 { 0%, 51.3% { opacity: 0; transform: translateX(-6px); } 53.3%, 94% { opacity: 1; transform: translateX(0); } 98%, 100% { opacity: 0; transform: translateX(0); } }
+    .l8 { animation: l8 14s ease-out infinite; }
+    @keyframes l8 { 0%, 58.9% { opacity: 0; transform: translateX(-6px); } 60.9%, 94% { opacity: 1; transform: translateX(0); } 98%, 100% { opacity: 0; transform: translateX(0); } }
+    .l9 { animation: l9 14s ease-out infinite; }
+    @keyframes l9 { 0%, 66.4% { opacity: 0; transform: translateX(-6px); } 68.4%, 94% { opacity: 1; transform: translateX(0); } 98%, 100% { opacity: 0; transform: translateX(0); } }
+    .n0 { animation: n0 14s step-end infinite; }
+    @keyframes n0 { 0% { opacity: 0; } 6.99% { opacity: 0; } 7.00% { opacity: 1; } 14.56% { opacity: 1; } 14.57% { opacity: 0; } 100% { opacity: 0; } }
+    .n1 { animation: n1 14s step-end infinite; }
+    @keyframes n1 { 0% { opacity: 0; } 14.55% { opacity: 0; } 14.56% { opacity: 1; } 22.11% { opacity: 1; } 22.12% { opacity: 0; } 100% { opacity: 0; } }
+    .n2 { animation: n2 14s step-end infinite; }
+    @keyframes n2 { 0% { opacity: 0; } 22.10% { opacity: 0; } 22.11% { opacity: 1; } 29.67% { opacity: 1; } 29.68% { opacity: 0; } 100% { opacity: 0; } }
+    .n3 { animation: n3 14s step-end infinite; }
+    @keyframes n3 { 0% { opacity: 0; } 29.66% { opacity: 0; } 29.67% { opacity: 1; } 37.22% { opacity: 1; } 37.23% { opacity: 0; } 100% { opacity: 0; } }
+    .n4 { animation: n4 14s step-end infinite; }
+    @keyframes n4 { 0% { opacity: 0; } 37.21% { opacity: 0; } 37.22% { opacity: 1; } 44.78% { opacity: 1; } 44.79% { opacity: 0; } 100% { opacity: 0; } }
+    .n5 { animation: n5 14s step-end infinite; }
+    @keyframes n5 { 0% { opacity: 0; } 44.77% { opacity: 0; } 44.78% { opacity: 1; } 52.33% { opacity: 1; } 52.34% { opacity: 0; } 100% { opacity: 0; } }
+    .n6 { animation: n6 14s step-end infinite; }
+    @keyframes n6 { 0% { opacity: 0; } 52.32% { opacity: 0; } 52.33% { opacity: 1; } 59.89% { opacity: 1; } 59.90% { opacity: 0; } 100% { opacity: 0; } }
+    .n7 { animation: n7 14s step-end infinite; }
+    @keyframes n7 { 0% { opacity: 0; } 59.88% { opacity: 0; } 59.89% { opacity: 1; } 67.44% { opacity: 1; } 67.45% { opacity: 0; } 100% { opacity: 0; } }
+    .n8 { animation: n8 14s step-end infinite; }
+    @keyframes n8 { 0% { opacity: 0; } 67.43% { opacity: 0; } 67.44% { opacity: 1; } 94.00% { opacity: 1; } 94.01% { opacity: 0; } 100% { opacity: 0; } }
+    .verdict { animation: verdict 14s ease-in-out infinite; }
+    @keyframes verdict { 0%, 76% { opacity: 0; } 80%, 94% { opacity: 1; } 98%, 100% { opacity: 0; } }
+    /* Without motion, the frame that shows the feature. */
+    @media (prefers-reduced-motion: reduce) {
+      .l1, .l2, .l3, .l4, .l5, .l6, .l7, .l8, .l9, .n0, .n1, .n2, .n3, .n4, .n5, .n6, .n7, .n8, .verdict { animation: none; }
+      .n0, .n1, .n2, .n3, .n4, .n5, .n6, .n7 { opacity: 0; }
+    }
+  </style>
+
+  <defs><clipPath id="window"><rect width="760" height="422" rx="12"/></clipPath></defs>
+
+  <g clip-path="url(#window)">
+    <rect width="760" height="422" fill="#14120f"/>
+    <rect width="760" height="28" fill="#191614"/>
+    <circle cx="16" cy="14" r="5" fill="#ec6a5e"/><circle cx="32" cy="14" r="5" fill="#f4bf4f"/><circle cx="48" cy="14" r="5" fill="#61c554"/>
+    <text x="380.0" y="18" font-size="11" fill="#6f665e" text-anchor="middle">pergula</text>
+    <line x1="0" y1="28.5" x2="760" y2="28.5" stroke="#322c28"/>
+
+    <rect x="24.5" y="50.5" width="452" height="134" rx="10" fill="#1c1917" stroke="#322c28"/>
+    <text x="40" y="70" font-size="10.5" fill="#6f665e" text-anchor="start" class="mono">~/.claude/projects/-work-orchard/<tspan fill="#f2ece4">a1f3.jsonl</tspan></text><text x="462" y="70" font-size="10.5" fill="#9b8f84" text-anchor="end">a session</text>
+    <g class="l1"><rect x="36.5" y="80.5" width="300" height="19" rx="5" fill="#12100e" stroke="#322c28"/><text x="46" y="94" font-size="10.5" fill="#ddd5cb" text-anchor="start" class="mono">"id": "msg_1", "output_tokens": 10</text><rect x="344.5" y="80.5" width="120" height="19" rx="9.5" fill="#2a3210" stroke="#c0e021"/><text x="404.5" y="94" font-size="10" fill="#f2ece4" text-anchor="middle">+1 call</text></g>
+    <g class="l2"><rect x="36.5" y="104.5" width="300" height="19" rx="5" fill="#12100e" stroke="#322c28"/><text x="46" y="118" font-size="10.5" fill="#ddd5cb" text-anchor="start" class="mono">"id": "msg_1", "output_tokens": 140</text><rect x="344.5" y="104.5" width="120" height="19" rx="9.5" fill="#171d24" stroke="#6fa8d6"/><text x="404.5" y="118" font-size="10" fill="#f2ece4" text-anchor="middle">+130 output</text></g>
+    <g class="l3"><rect x="36.5" y="128.5" width="300" height="19" rx="5" fill="#12100e" stroke="#322c28"/><text x="46" y="142" font-size="10.5" fill="#ddd5cb" text-anchor="start" class="mono">"id": "msg_1", "output_tokens": 257</text><rect x="344.5" y="128.5" width="120" height="19" rx="9.5" fill="#171d24" stroke="#6fa8d6"/><text x="404.5" y="142" font-size="10" fill="#f2ece4" text-anchor="middle">+117 output</text></g>
+    <g class="l4"><rect x="36.5" y="152.5" width="300" height="19" rx="5" fill="#12100e" stroke="#322c28"/><text x="46" y="166" font-size="10.5" fill="#ddd5cb" text-anchor="start" class="mono">"id": "msg_2", "output_tokens": 512</text><rect x="344.5" y="152.5" width="120" height="19" rx="9.5" fill="#2a3210" stroke="#c0e021"/><text x="404.5" y="166" font-size="10" fill="#f2ece4" text-anchor="middle">+1 call</text></g>
+    <rect x="24.5" y="196.5" width="452" height="110" rx="10" fill="#1c1917" stroke="#322c28"/>
+    <text x="40" y="216" font-size="10.5" fill="#6f665e" text-anchor="start" class="mono"><tspan fill="#f2ece4">b7c2.jsonl</tspan></text><text x="462" y="216" font-size="10.5" fill="#9b8f84" text-anchor="end">continues a1f3</text>
+    <g class="l5"><rect x="36.5" y="226.5" width="300" height="19" rx="5" fill="#12100e" stroke="#322c28"/><text x="46" y="240" font-size="10.5" fill="#6f665e" text-anchor="start" class="mono">"id": "msg_1", "output_tokens": 257</text><rect x="344.5" y="226.5" width="120" height="19" rx="9.5" fill="#232020" stroke="#6f665e"/><text x="404.5" y="240" font-size="10" fill="#9b8f84" text-anchor="middle">copy · counted</text></g>
+    <g class="l6"><rect x="36.5" y="250.5" width="300" height="19" rx="5" fill="#12100e" stroke="#322c28"/><text x="46" y="264" font-size="10.5" fill="#6f665e" text-anchor="start" class="mono">"id": "msg_2", "output_tokens": 512</text><rect x="344.5" y="250.5" width="120" height="19" rx="9.5" fill="#232020" stroke="#6f665e"/><text x="404.5" y="264" font-size="10" fill="#9b8f84" text-anchor="middle">copy · counted</text></g>
+    <g class="l7"><rect x="36.5" y="274.5" width="300" height="19" rx="5" fill="#12100e" stroke="#322c28"/><text x="46" y="288" font-size="10.5" fill="#ddd5cb" text-anchor="start" class="mono">"id": "msg_3", "output_tokens": 88</text><rect x="344.5" y="274.5" width="120" height="19" rx="9.5" fill="#2a3210" stroke="#c0e021"/><text x="404.5" y="288" font-size="10" fill="#f2ece4" text-anchor="middle">+1 call</text></g>
+    <rect x="24.5" y="318.5" width="452" height="86" rx="10" fill="#1c1917" stroke="#322c28"/>
+    <text x="40" y="338" font-size="10.5" fill="#6f665e" text-anchor="start" class="mono"><tspan fill="#f2ece4">a1f3/subagents/agent-a.jsonl</tspan></text><text x="462" y="338" font-size="10.5" fill="#9b8f84" text-anchor="end">a fork of a1f3</text>
+    <g class="l8"><rect x="36.5" y="348.5" width="300" height="19" rx="5" fill="#12100e" stroke="#322c28"/><text x="46" y="362" font-size="10.5" fill="#6f665e" text-anchor="start" class="mono">"id": "msg_1", "output_tokens": 257</text><rect x="344.5" y="348.5" width="120" height="19" rx="9.5" fill="#232020" stroke="#6f665e"/><text x="404.5" y="362" font-size="10" fill="#9b8f84" text-anchor="middle">copy · counted</text></g>
+    <g class="l9"><rect x="36.5" y="372.5" width="300" height="19" rx="5" fill="#12100e" stroke="#322c28"/><text x="46" y="386" font-size="10.5" fill="#ddd5cb" text-anchor="start" class="mono">"id": "msg_9", "output_tokens": 300</text><rect x="344.5" y="372.5" width="120" height="19" rx="9.5" fill="#2a3210" stroke="#c0e021"/><text x="404.5" y="386" font-size="10" fill="#f2ece4" text-anchor="middle">+1 call</text></g>
+    <rect x="492.5" y="50.5" width="244" height="354" rx="10" fill="#1c1917" stroke="#322c28"/>
+    <text x="508" y="76" font-size="9.5" fill="#6f665e" text-anchor="start" font-weight="700" letter-spacing=".08em">ADDING UP LINES</text>
+    <text x="508" y="200" font-size="9.5" fill="#c0e021" text-anchor="start" font-weight="700" letter-spacing=".08em">PERGULA</text>
+    <text x="508" y="114" font-size="10.5" fill="#9b8f84" text-anchor="start">calls</text><text x="620" y="114" font-size="10.5" fill="#9b8f84" text-anchor="start">output</text>
+    <text x="508" y="238" font-size="10.5" fill="#9b8f84" text-anchor="start">calls</text><text x="620" y="238" font-size="10.5" fill="#9b8f84" text-anchor="start">output</text>
+    <line x1="508" x2="722" y1="172.5" y2="172.5" stroke="#322c28"/>
+    <g class="n0"><text x="508" y="144" font-size="24" fill="#9b8f84" text-anchor="start" font-weight="700">1</text><text x="620" y="144" font-size="24" fill="#9b8f84" text-anchor="start" font-weight="700">10</text><text x="508" y="268" font-size="24" fill="#f2ece4" text-anchor="start" font-weight="700">1</text><text x="620" y="268" font-size="24" fill="#f2ece4" text-anchor="start" font-weight="700">10</text></g>
+    <g class="n1"><text x="508" y="144" font-size="24" fill="#9b8f84" text-anchor="start" font-weight="700">2</text><text x="620" y="144" font-size="24" fill="#9b8f84" text-anchor="start" font-weight="700">150</text><text x="508" y="268" font-size="24" fill="#f2ece4" text-anchor="start" font-weight="700">1</text><text x="620" y="268" font-size="24" fill="#f2ece4" text-anchor="start" font-weight="700">140</text></g>
+    <g class="n2"><text x="508" y="144" font-size="24" fill="#9b8f84" text-anchor="start" font-weight="700">3</text><text x="620" y="144" font-size="24" fill="#9b8f84" text-anchor="start" font-weight="700">407</text><text x="508" y="268" font-size="24" fill="#f2ece4" text-anchor="start" font-weight="700">1</text><text x="620" y="268" font-size="24" fill="#f2ece4" text-anchor="start" font-weight="700">257</text></g>
+    <g class="n3"><text x="508" y="144" font-size="24" fill="#9b8f84" text-anchor="start" font-weight="700">4</text><text x="620" y="144" font-size="24" fill="#9b8f84" text-anchor="start" font-weight="700">919</text><text x="508" y="268" font-size="24" fill="#f2ece4" text-anchor="start" font-weight="700">2</text><text x="620" y="268" font-size="24" fill="#f2ece4" text-anchor="start" font-weight="700">769</text></g>
+    <g class="n4"><text x="508" y="144" font-size="24" fill="#9b8f84" text-anchor="start" font-weight="700">5</text><text x="620" y="144" font-size="24" fill="#9b8f84" text-anchor="start" font-weight="700">1,176</text><text x="508" y="268" font-size="24" fill="#f2ece4" text-anchor="start" font-weight="700">2</text><text x="620" y="268" font-size="24" fill="#f2ece4" text-anchor="start" font-weight="700">769</text></g>
+    <g class="n5"><text x="508" y="144" font-size="24" fill="#9b8f84" text-anchor="start" font-weight="700">6</text><text x="620" y="144" font-size="24" fill="#9b8f84" text-anchor="start" font-weight="700">1,688</text><text x="508" y="268" font-size="24" fill="#f2ece4" text-anchor="start" font-weight="700">2</text><text x="620" y="268" font-size="24" fill="#f2ece4" text-anchor="start" font-weight="700">769</text></g>
+    <g class="n6"><text x="508" y="144" font-size="24" fill="#9b8f84" text-anchor="start" font-weight="700">7</text><text x="620" y="144" font-size="24" fill="#9b8f84" text-anchor="start" font-weight="700">1,776</text><text x="508" y="268" font-size="24" fill="#f2ece4" text-anchor="start" font-weight="700">3</text><text x="620" y="268" font-size="24" fill="#f2ece4" text-anchor="start" font-weight="700">857</text></g>
+    <g class="n7"><text x="508" y="144" font-size="24" fill="#9b8f84" text-anchor="start" font-weight="700">8</text><text x="620" y="144" font-size="24" fill="#9b8f84" text-anchor="start" font-weight="700">2,033</text><text x="508" y="268" font-size="24" fill="#f2ece4" text-anchor="start" font-weight="700">3</text><text x="620" y="268" font-size="24" fill="#f2ece4" text-anchor="start" font-weight="700">857</text></g>
+    <g class="n8"><text x="508" y="144" font-size="24" fill="#9b8f84" text-anchor="start" font-weight="700">9</text><text x="620" y="144" font-size="24" fill="#9b8f84" text-anchor="start" font-weight="700">2,333</text><text x="508" y="268" font-size="24" fill="#f2ece4" text-anchor="start" font-weight="700">4</text><text x="620" y="268" font-size="24" fill="#f2ece4" text-anchor="start" font-weight="700">1,157</text></g>
+    <g class="verdict"><text x="508" y="304" font-size="11" fill="#ddd5cb" text-anchor="start">each response counted once,</text><text x="508" y="321" font-size="11" fill="#ddd5cb" text-anchor="start">where it was made, with the</text><text x="508" y="338" font-size="11" fill="#ddd5cb" text-anchor="start">output its last line reports</text></g>
+  </g>
+
+  <rect x=".5" y=".5" width="759" height="421" rx="12" fill="none" stroke="#322c28"/>
+</svg>
