@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import bisect
 import json
 import os
 import plistlib
@@ -38,6 +39,7 @@ import time
 import unicodedata
 import urllib.error
 import urllib.request
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -100,6 +102,52 @@ SESSION_ID = re.compile(r"[\w-]+")
 CAFFEINE_PATH = Path.home() / ".claude" / "pergula-caffeine.json"
 CAFFEINE_HOURS = (1, 2, 4, 8)
 CAFFEINE_LIMIT = 12
+
+# Usage: what every response cost, summed by the hour, project, session, model
+# and main agent or subagent. The CLI deletes transcripts after thirty days, so
+# the sums live in a file of their own and outgrow the transcripts they came
+# from. Hours rather than days, because the quota week turns at an hour of a
+# weekday and a day-sized sum cannot be cut there.
+USAGE_PATH = Path.home() / ".claude" / "pergula-usage.json"
+USAGE_VERSION = 1
+USAGE_INTERVAL = 120
+USAGE_SAVE_EVERY = 40
+
+# A response is written as several lines that repeat its id. Only the ids near
+# the end of what was read matter: the repeats sit next to each other, so a
+# response cut in two by a read meets its other half at the start of the next.
+USAGE_RECENT_IDS = 64
+
+# Past this many tokens of context a call is a long one; the share of those is
+# one of the three indicators.
+CONTEXT_LARGE = 200_000
+
+WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+QUOTA_RESET = {"weekday": "sat", "hour": 14}
+HOUR_KEY = "%Y-%m-%dT%H"
+SPANS = ("day", "week", "month", "year", "custom")
+
+# Dollars per million tokens: input, cache read, cache write for five minutes,
+# cache write for an hour, output. Anthropic's list prices on the date below.
+# The figure is an equivalent, not a bill: the subscription is not charged by
+# the token. An old table distorts the dollars and never the tokens.
+PRICES_DATE = "2026-10-06"
+PRICES = {
+    "claude-fable-5-1": (10.0, 0.25, 12.5, 20.0, 50.0),
+    "claude-opus-5-5": (4.0, 0.20, 5.0, 8.0, 20.0),
+    "claude-sonnet-5-5": (2.0, 0.20, 2.5, 4.0, 10.0),
+    "claude-haiku-5-5": (0.10, 0.01, 0.125, 0.20, 0.50),
+    "claude-sonnet-4-6": (3.0, 0.30, 3.75, 6.0, 15.0),
+    "claude-haiku-4-5": (1.0, 0.10, 1.25, 2.0, 5.0),
+}
+
+# What the indexer has done, for the page that waits on the first pass.
+_USAGE = {"state": None, "done": 0, "total": 0, "ready": False}
+_USAGE_LOCK = threading.Lock()
+_INDEX_LOCK = threading.Lock()
+
+# A working directory becomes a repository once per run: git is asked once.
+_ROOTS: dict[str, str] = {}
 
 # The app icon, embedded rather than kept beside the script: pergula is one
 # file with nothing next to it, and that is the point. Source of truth for the
@@ -1027,6 +1075,750 @@ def build_state(scope: Path | None, session: str | None, limit: int) -> dict:
     }
 
 
+# USAGE
+
+LEAF_FIELDS = ("calls", "input", "cache_read", "cache_write", "cache_write_1h", "output",
+               "ctx_sum", "ctx_over_200k", "ctx_max", "starts", "first_ctx")
+CWD_FIELD = re.compile(rb'"cwd":\s*"((?:[^"\\]|\\.)*)"')
+MODEL_NAME = re.compile(r"^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?$")
+
+
+def fresh_usage() -> dict:
+    return {
+        "version": USAGE_VERSION,
+        "settings": {"quota_reset": dict(QUOTA_RESET)},
+        "files": {},
+        "folders": {},
+        "titles": {},
+        "hours": {},
+        "versions": {},
+    }
+
+
+def set_aside_usage() -> None:
+    """A summary that cannot be read is moved out of the way rather than
+    overwritten: it may hold months the transcripts no longer have."""
+    try:
+        USAGE_PATH.replace(USAGE_PATH.with_name(USAGE_PATH.name + ".broken"))
+    except OSError:
+        return
+
+
+def load_usage() -> dict:
+    try:
+        data = json.loads(USAGE_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return fresh_usage()
+    except (OSError, ValueError):
+        set_aside_usage()
+        return fresh_usage()
+
+    shape = fresh_usage()
+    sound = (
+        isinstance(data, dict)
+        and data.get("version") == USAGE_VERSION
+        and all(isinstance(data.get(key), dict) for key in shape if key != "version")
+    )
+    if not sound:
+        set_aside_usage()
+        return shape
+
+    data["settings"]["quota_reset"] = quota_reset(data)
+    return data
+
+
+def save_usage(state: dict) -> None:
+    """Written beside the real file and renamed over it, so a crash mid-write
+    leaves the previous summary whole instead of half of a new one."""
+    temporary = USAGE_PATH.with_name(USAGE_PATH.name + ".tmp")
+    temporary.write_text(json.dumps(state, separators=(",", ":")), encoding="utf-8")
+    os.replace(temporary, USAGE_PATH)
+
+
+def quota_reset(state: dict) -> dict:
+    reset = (state.get("settings") or {}).get("quota_reset")
+    if not isinstance(reset, dict):
+        return dict(QUOTA_RESET)
+
+    weekday = reset.get("weekday")
+    hour = reset.get("hour")
+    valid = weekday in WEEKDAYS and isinstance(hour, int) and 0 <= hour <= 23
+    if not valid:
+        return dict(QUOTA_RESET)
+
+    return {"weekday": weekday, "hour": hour}
+
+
+def local_hour(stamp: str) -> str:
+    """The local hour a UTC stamp fell in, or nothing. A day is the day on this
+    machine's clock: work done at 23:00 belongs to the evening it was done in."""
+    try:
+        moment = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return ""
+
+    if moment.tzinfo is None:
+        return ""
+
+    return moment.astimezone().strftime(HOUR_KEY)
+
+
+def model_label(model: str) -> str:
+    """claude-opus-5-5 reads as opus 5.5; anything else as it came."""
+    found = MODEL_NAME.match(model)
+    if not found:
+        return model
+
+    family, major, minor = found.groups()
+    return f"{family} {major}.{minor}" if minor else f"{family} {major}"
+
+
+def minor_version(version: str) -> str:
+    """2.1.296 is 2.1: a patch release changes nothing worth marking."""
+    parts = str(version).split(".")
+    if len(parts) < 2:
+        return ""
+
+    return ".".join(parts[:2])
+
+
+def price_of(model: str) -> tuple | None:
+    for prefix, price in PRICES.items():
+        if model.startswith(prefix):
+            return price
+
+    return None
+
+
+def leaf_cost(model: str, leaf: dict) -> float | None:
+    price = price_of(model)
+    if price is None:
+        return None
+
+    short_writes = leaf["cache_write"] - leaf.get("cache_write_1h", 0)
+    total = (
+        leaf["input"] * price[0]
+        + leaf["cache_read"] * price[1]
+        + short_writes * price[2]
+        + leaf.get("cache_write_1h", 0) * price[3]
+        + leaf["output"] * price[4]
+    )
+    return total / 1_000_000
+
+
+def leaf_tokens(leaf: dict) -> int:
+    return leaf["input"] + leaf["cache_read"] + leaf["cache_write"] + leaf["output"]
+
+
+def repository_root(cwd: str) -> str:
+    """The repository a working directory belongs to. A worktree's common git
+    directory is the main checkout's, so its work is summed there."""
+    cached = _ROOTS.get(cwd)
+    if cached is not None:
+        return cached
+
+    if not Path(cwd).is_dir():
+        return ""
+
+    try:
+        probe = subprocess.run(
+            ["git", "-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            capture_output=True, text=True, timeout=5,
+        )
+        common = probe.stdout.strip() if probe.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        common = ""
+
+    root = cwd
+    if common:
+        root = str(Path(common).parent) if Path(common).name == ".git" else common
+
+    _ROOTS[cwd] = root
+    return root
+
+
+def project_of(folder: str, home: tuple[str, bool], folders: dict) -> str:
+    """Transcript folder to repository. A folder whose directory is gone keeps
+    the answer it had last time; one never answered falls back to its name.
+    `home` is a working directory and whether it is the folder's own."""
+    cwd, own = home
+    known = folders.get(folder)
+    stray = not own
+    if stray and known:
+        return known
+
+    root = repository_root(cwd) if cwd else ""
+    if root and stray:
+        return root
+
+    if root:
+        folders[folder] = root
+        return root
+
+    return folders.get(folder) or "/" + folder.lstrip("-").replace("-", "/")
+
+
+def usage_files() -> list[Path]:
+    return sorted(PROJECTS.glob("*/*.jsonl")) + sorted(PROJECTS.glob("*/*/subagents/*.jsonl"))
+
+
+def file_identity(path: Path) -> tuple[str, str, str]:
+    """(folder, session, main or sub). A subagent's file sits under the folder
+    named after the session that started it, and its work is that session's."""
+    relative = path.relative_to(PROJECTS).parts
+    if len(relative) == 2:
+        return relative[0], path.stem, "main"
+
+    return relative[0], relative[1], "sub"
+
+
+def read_calls(lines: list[bytes], recent: list[str]) -> list[dict]:
+    """Every response in these lines, once. `recent` carries the ids from the
+    previous read and is extended in place."""
+    seen = set(recent)
+    calls = []
+    for line in lines:
+        if b'"usage"' not in line:
+            continue
+        try:
+            record = json.loads(drop_blobs(line))
+        except ValueError:
+            continue
+
+        message = record.get("message") if isinstance(record, dict) else None
+        if record.get("type") != "assistant" or not isinstance(message, dict):
+            continue
+
+        usage = message.get("usage")
+        model = message.get("model") or ""
+        hour = local_hour(record.get("timestamp") or "")
+        countable = isinstance(usage, dict) and hour and model and model != "<synthetic>"
+        if not countable:
+            continue
+
+        key = message.get("id") or record.get("uuid") or ""
+        if key in seen:
+            continue
+        seen.add(key)
+        recent.append(key)
+
+        written = usage.get("cache_creation") if isinstance(usage.get("cache_creation"), dict) else {}
+        calls.append({
+            "hour": hour,
+            "model": model,
+            "version": minor_version(record.get("version") or ""),
+            "input": int(usage.get("input_tokens") or 0),
+            "cache_read": int(usage.get("cache_read_input_tokens") or 0),
+            "cache_write": int(usage.get("cache_creation_input_tokens") or 0),
+            "cache_write_1h": int(written.get("ephemeral_1h_input_tokens") or 0),
+            "output": int(usage.get("output_tokens") or 0),
+        })
+
+    del recent[:-USAGE_RECENT_IDS]
+    return calls
+
+
+def read_usage(path: Path, entry: dict) -> tuple[dict, list[dict], tuple[str, bool]] | None:
+    """What a transcript added since the offset in `entry`: the entry to keep,
+    the calls found and where it ran (see home_directory), or nothing when it
+    did not grow. The bookkeeping mirrors parse_transcript and fails as silently."""
+    size = path.stat().st_size
+    offset = int(entry.get("offset") or 0)
+    if size == offset:
+        return None
+
+    # Transcripts only grow. One that shrank was rewritten, and reading it
+    # again from zero would count what it still holds a second time.
+    shrank = size < offset
+    if shrank:
+        return {**entry, "offset": size}, [], ("", False)
+
+    with path.open("rb") as handle:
+        handle.seek(offset)
+        chunk = handle.read()
+
+    end = chunk.rfind(b"\n")
+    if end == -1:
+        return None
+
+    lines = chunk[:end].split(b"\n")
+    recent = list(entry.get("ids") or [])
+    calls = read_calls(lines, recent)
+
+    home = ("", False) if entry.get("project") else home_directory(path, chunk[:end])
+
+    return {**entry, "offset": offset + end + 1, "ids": recent}, calls, home
+
+
+def home_directory(path: Path, chunk: bytes) -> tuple[str, bool]:
+    """The directory the CLI filed this transcript under, and whether it is
+    that. A session can move to a scratch folder before its first record, so
+    the one that names the transcript's folder wins over whichever came first."""
+    folder = file_identity(path)[0]
+    seen = []
+    for found in CWD_FIELD.finditer(chunk):
+        try:
+            cwd = json.loads(b'"' + found.group(1) + b'"')
+        except ValueError:
+            continue
+
+        if project_slug(Path(cwd)) == folder:
+            return cwd, True
+
+        seen.append(cwd)
+        if len(seen) >= 50:
+            break
+
+    # None names the folder: a subagent sent elsewhere, typically. The folder's
+    # own repository, once known, is a better answer than a scratch directory.
+    return (seen[0] if seen else ""), False
+
+
+def add_call(state: dict, project: str, session: str, kind: str, call: dict, first: bool) -> None:
+    sessions = state["hours"].setdefault(call["hour"], {}).setdefault(project, {})
+    leaf = sessions.setdefault(session, {}).setdefault(call["model"], {}).setdefault(kind, {})
+    for field in LEAF_FIELDS:
+        leaf.setdefault(field, 0)
+
+    context = call["input"] + call["cache_read"] + call["cache_write"]
+    leaf["calls"] += 1
+    for field in ("input", "cache_read", "cache_write", "cache_write_1h", "output"):
+        leaf[field] += call[field]
+    leaf["ctx_sum"] += context
+    leaf["ctx_over_200k"] += int(context > CONTEXT_LARGE)
+    leaf["ctx_max"] = max(leaf["ctx_max"], context)
+
+    # The first call of a session or a subagent carries only what every call
+    # carries: the system prompt, the tools, the rules. That is the fixed base.
+    if first:
+        leaf["starts"] += 1
+        leaf["first_ctx"] += context
+
+    if not call["version"]:
+        return
+
+    day = state["versions"].setdefault(call["hour"][:10], {})
+    day[call["version"]] = day.get(call["version"], 0) + 1
+
+
+def merge_usage(state: dict, path: Path, entry: dict, calls: list[dict], home: tuple[str, bool]) -> None:
+    """Callers hold _USAGE_LOCK."""
+    folder, session, kind = file_identity(path)
+    if not entry.get("project"):
+        entry["project"] = project_of(folder, home, state["folders"])
+
+    for call in calls:
+        first = not entry.get("started")
+        entry["started"] = True
+        add_call(state, entry["project"], session, kind, call, first)
+
+    state["files"][str(path)] = entry
+
+
+def remember_title(state: dict, path: Path) -> None:
+    """Titles are read while the transcript exists, so a session keeps its name
+    in the panel after the CLI has deleted the file."""
+    _folder, session, kind = file_identity(path)
+    if kind != "main":
+        return
+
+    try:
+        title = session_meta(path)["title"]
+    except OSError:
+        return
+
+    state["titles"][session] = {"title": title, "path": str(path)}
+
+
+def usage_state() -> dict:
+    """Callers hold _USAGE_LOCK."""
+    if _USAGE["state"] is None:
+        _USAGE["state"] = load_usage()
+
+    return _USAGE["state"]
+
+
+def index_usage() -> None:
+    """One pass over every transcript, reading only what grew. The first pass
+    reads everything; later ones read minutes of work."""
+    claimed = _INDEX_LOCK.acquire(blocking=False)
+    if not claimed:
+        return
+
+    try:
+        index_usage_locked()
+    finally:
+        _INDEX_LOCK.release()
+
+
+def index_usage_locked() -> None:
+    with _USAGE_LOCK:
+        state = usage_state()
+        known = dict(state["files"])
+
+    files = usage_files()
+    with _USAGE_LOCK:
+        _USAGE["done"] = 0
+        _USAGE["total"] = len(files)
+
+    changed = 0
+    for path in files:
+        try:
+            result = read_usage(path, dict(known.get(str(path)) or {}))
+        except OSError:
+            result = None
+
+        with _USAGE_LOCK:
+            _USAGE["done"] += 1
+            if result is None:
+                continue
+
+            entry, calls, home = result
+            merge_usage(state, path, entry, calls, home)
+            remember_title(state, path)
+            changed += 1
+            due = changed % USAGE_SAVE_EVERY == 0
+            if due:
+                save_usage(state)
+
+    present = {str(path) for path in files}
+    with _USAGE_LOCK:
+        gone = [key for key in state["files"] if key not in present]
+        for key in gone:
+            del state["files"][key]
+
+        if changed or gone:
+            save_usage(state)
+
+        _USAGE["ready"] = True
+
+
+def usage_loop() -> None:
+    while True:
+        try:
+            index_usage()
+        except (OSError, ValueError) as error:
+            print(f"pergula: usage index failed — {error}", file=sys.stderr, flush=True)
+
+        time.sleep(USAGE_INTERVAL)
+
+
+def usage_status() -> dict:
+    with _USAGE_LOCK:
+        return {"ready": _USAGE["ready"], "done": _USAGE["done"], "total": _USAGE["total"]}
+
+
+def set_quota_reset(weekday: str, hour: int) -> dict:
+    with _USAGE_LOCK:
+        state = usage_state()
+        state["settings"]["quota_reset"] = {"weekday": weekday, "hour": hour}
+        save_usage(state)
+        return quota_reset(state)
+
+
+# Windows. Everything below works on naive local datetimes, and an hour is
+# named by its key, so a window is a range of keys and comparing them is a
+# string comparison.
+
+
+def quota_week_start(moment: datetime, reset: dict) -> datetime:
+    """The start of the quota week holding a local moment."""
+    target = WEEKDAYS.index(reset["weekday"])
+    start = moment.replace(hour=reset["hour"], minute=0, second=0, microsecond=0)
+    start -= timedelta(days=(start.weekday() - target) % 7)
+    if start > moment:
+        start -= timedelta(days=7)
+
+    return start
+
+
+def month_start(moment: datetime, step: int = 0) -> datetime:
+    index = moment.year * 12 + moment.month - 1 + step
+    return datetime(index // 12, index % 12 + 1, 1)
+
+
+def next_boundary(moment: datetime, unit: str) -> datetime:
+    if unit == "hour":
+        return moment.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+
+    if unit == "day":
+        return datetime(moment.year, moment.month, moment.day) + timedelta(days=1)
+
+    return month_start(moment, 1)
+
+
+def split_window(start: datetime, end: datetime, unit: str) -> list[tuple[datetime, datetime]]:
+    bars = []
+    cursor = start
+    while cursor < end:
+        following = next_boundary(cursor, unit)
+        bars.append((cursor, min(following, end)))
+        cursor = following
+
+    return bars
+
+
+def parse_day(text: str) -> datetime | None:
+    try:
+        return datetime.strptime(text, "%Y-%m-%d")
+    except (TypeError, ValueError):
+        return None
+
+
+def usage_window(span: str, at: str, first: str, reset: dict) -> dict:
+    """Start, end, bars and the neighbours of a window. `at` is an hour key
+    inside the window wanted; for "custom" it is "from..to" in days."""
+    if span not in SPANS:
+        span = "week"
+
+    try:
+        moment = datetime.strptime(at, HOUR_KEY)
+    except (TypeError, ValueError):
+        moment = datetime.now().replace(minute=0, second=0, microsecond=0)
+
+    if span == "day":
+        start = datetime(moment.year, moment.month, moment.day)
+        end = start + timedelta(days=1)
+        unit = "hour"
+
+    if span == "week":
+        start = quota_week_start(moment, reset)
+        end = start + timedelta(days=7)
+        unit = "day"
+
+    if span == "month":
+        start = month_start(moment)
+        end = month_start(moment, 1)
+        unit = "day"
+
+    if span == "year":
+        start = datetime(moment.year, 1, 1)
+        end = datetime(moment.year + 1, 1, 1)
+        unit = "month"
+
+    if span == "custom":
+        head, _, tail = str(at).partition("..")
+        start = parse_day(head) or datetime(moment.year, moment.month, moment.day)
+        end = (parse_day(tail) or start) + timedelta(days=1)
+        end = max(end, start + timedelta(days=1))
+        unit = "day" if (end - start).days <= 62 else "month"
+
+    length = end - start
+    earlier = start - (length if span == "custom" else timedelta(hours=1))
+    previous = (
+        f"{earlier:%Y-%m-%d}..{start - timedelta(days=1):%Y-%m-%d}"
+        if span == "custom" else earlier.strftime(HOUR_KEY)
+    )
+    following = (
+        f"{end:%Y-%m-%d}..{end + length - timedelta(days=1):%Y-%m-%d}"
+        if span == "custom" else end.strftime(HOUR_KEY)
+    )
+
+    has_earlier = bool(first) and first < start.strftime(HOUR_KEY)
+    has_later = end <= datetime.now()
+
+    # The ISO week holding the middle of a quota week holds most of it, so
+    # that is the number the week goes by.
+    middle = start + length / 2
+
+    return {
+        "span": span,
+        "start": start.strftime(HOUR_KEY),
+        "end": end.strftime(HOUR_KEY),
+        "unit": unit,
+        "week": middle.isocalendar()[1],
+        "bars": [(head.strftime(HOUR_KEY), tail.strftime(HOUR_KEY))
+                 for head, tail in split_window(start, end, unit)],
+        "prev": previous if has_earlier else "",
+        "next": following if has_later else "",
+    }
+
+
+def detect_milestones(state: dict) -> list[dict]:
+    """A day whose most-used model, or whose Claude Code version x.y, is not
+    the previous day's. Worked out from the summary each time, never stored,
+    so a better rule rewrites the whole history."""
+    models: dict[str, dict] = {}
+    for hour, projects in state["hours"].items():
+        day = models.setdefault(hour[:10], {})
+        for sessions in projects.values():
+            for by_model in sessions.values():
+                for model, kinds in by_model.items():
+                    # The model chosen for the session, not the cheaper one a
+                    # subagent was handed: that changes with the task.
+                    calls = (kinds.get("main") or {}).get("calls", 0)
+                    if calls:
+                        day[model] = day.get(model, 0) + calls
+
+    found = []
+    tracks = (("model", models, model_label), ("version", state["versions"], lambda name: f"claude code {name}"))
+    for kind, days, label in tracks:
+        before = ""
+        for day in sorted(days):
+            counts = days[day]
+            if not counts:
+                continue
+
+            leader = max(sorted(counts), key=lambda name: counts[name])
+            moved = before and leader != before
+            if moved:
+                found.append({"day": day, "kind": kind, "label": label(leader)})
+            before = leader
+
+    found.sort(key=lambda mark: (mark["day"], mark["kind"]))
+    return found
+
+
+def project_names(paths) -> dict:
+    """A repository's nickname from the sidebar when it has one, else its
+    folder's name."""
+    names = load_names()
+    return {path: names.get(project_slug(Path(path))) or Path(path).name or path for path in paths}
+
+
+def blank_sums() -> dict:
+    return {"calls": 0, "tokens": 0, "input": 0, "cache_read": 0, "cache_write": 0, "output": 0,
+            "usd": 0.0, "unpriced": 0, "ctx_sum": 0, "ctx_over": 0, "starts": 0, "first_ctx": 0,
+            "sub": 0}
+
+
+def add_leaf(sums: dict, model: str, kind: str, leaf: dict) -> None:
+    tokens = leaf_tokens(leaf)
+    cost = leaf_cost(model, leaf)
+    sums["calls"] += leaf["calls"]
+    sums["tokens"] += tokens
+    for field in ("input", "cache_read", "cache_write", "output"):
+        sums[field] += leaf[field]
+    sums["ctx_sum"] += leaf["ctx_sum"]
+    sums["ctx_over"] += leaf["ctx_over_200k"]
+    sums["usd"] += cost or 0.0
+    sums["unpriced"] += tokens if cost is None else 0
+    if kind == "sub":
+        sums["sub"] += tokens
+        return
+
+    # The base is a session's: a subagent starts lighter, and mixing the two
+    # would report neither.
+    sums["starts"] += leaf["starts"]
+    sums["first_ctx"] += leaf["first_ctx"]
+
+
+def indicators(sums: dict) -> dict:
+    calls = sums["calls"]
+    return {
+        "context": sums["ctx_sum"] / calls if calls else 0,
+        "large": 100 * sums["ctx_over"] / calls if calls else 0,
+        "base": sums["first_ctx"] / sums["starts"] if sums["starts"] else 0,
+    }
+
+
+def walk_leaves(state: dict, start: str, end: str):
+    """(hour, project, session, model, kind, leaf) for every sum inside a window."""
+    for hour in sorted(state["hours"]):
+        inside = start <= hour < end
+        if not inside:
+            continue
+
+        for project, sessions in state["hours"][hour].items():
+            for session, by_model in sessions.items():
+                for model, kinds in by_model.items():
+                    for kind, leaf in kinds.items():
+                        yield hour, project, session, model, kind, leaf
+
+
+def usage_report(state: dict, span: str, at: str, off: set) -> dict:
+    """Callers hold _USAGE_LOCK."""
+    hours = sorted(state["hours"])
+    first = hours[0] if hours else ""
+    window = usage_window(span, at, first, quota_reset(state))
+
+    # Colours go by the last thirty days, then by all time: the projects being
+    # worked on get the eight colours, and moving the window does not repaint.
+    recent = (datetime.now() - timedelta(days=30)).strftime(HOUR_KEY)
+    weight: dict[str, tuple[int, int]] = {}
+    for hour, project, _session, _model, _kind, leaf in walk_leaves(state, "", "~"):
+        lately, ever = weight.get(project, (0, 0))
+        fresh = leaf_tokens(leaf) if hour >= recent else 0
+        weight[project] = (lately + fresh, ever + leaf_tokens(leaf))
+    ranking = sorted(weight, key=lambda project: (-weight[project][0], -weight[project][1]))
+
+    starts = [head for head, _tail in window["bars"]]
+    bars = [{"start": head, "end": tail, "values": {}} for head, tail in window["bars"]]
+    totals = blank_sums()
+    projects: dict[str, dict] = {}
+    for hour, project, _session, model, kind, leaf in walk_leaves(state, window["start"], window["end"]):
+        add_leaf(projects.setdefault(project, blank_sums()), model, kind, leaf)
+        if project in off:
+            continue
+
+        add_leaf(totals, model, kind, leaf)
+        values = bars[bisect.bisect_right(starts, hour) - 1]["values"]
+        values[project] = values.get(project, 0) + leaf_tokens(leaf)
+
+    names = project_names(projects)
+    rows = []
+    for project, sums in projects.items():
+        rows.append({
+            "path": project,
+            "name": names[project],
+            "on": project not in off,
+            "tokens": sums["tokens"],
+            "calls": sums["calls"],
+            "share": 100 * sums["tokens"] / totals["tokens"] if totals["tokens"] and project not in off else 0,
+            "sub": 100 * sums["sub"] / sums["tokens"] if sums["tokens"] else 0,
+            "usd": sums["usd"],
+            **indicators(sums),
+        })
+    rows.sort(key=lambda row: -row["tokens"])
+
+    return {
+        **window,
+        "bars": bars,
+        "first": first,
+        "now": datetime.now().strftime(HOUR_KEY),
+        "settings": quota_reset(state),
+        "status": {"ready": _USAGE["ready"], "done": _USAGE["done"], "total": _USAGE["total"]},
+        "prices": PRICES_DATE,
+        "totals": {key: totals[key] for key in ("calls", "tokens", "input", "cache_read",
+                                                "cache_write", "output", "usd", "unpriced")},
+        "indicators": indicators(totals),
+        "projects": rows,
+        "ranking": ranking,
+        "milestones": detect_milestones(state),
+    }
+
+
+def usage_sessions(state: dict, span: str, at: str, project: str) -> dict:
+    """The sessions of one project inside a window, heaviest first. Callers
+    hold _USAGE_LOCK."""
+    hours = sorted(state["hours"])
+    window = usage_window(span, at, hours[0] if hours else "", quota_reset(state))
+
+    found: dict[str, dict] = {}
+    for hour, owner, session, model, kind, leaf in walk_leaves(state, window["start"], window["end"]):
+        if owner != project:
+            continue
+
+        row = found.setdefault(session, {"id": session, "first": hour, "tokens": 0, "calls": 0,
+                                         "subagents": 0, "sub": 0, "context": 0, "usd": 0.0})
+        tokens = leaf_tokens(leaf)
+        row["tokens"] += tokens
+        row["calls"] += leaf["calls"]
+        row["context"] = max(row["context"], leaf["ctx_max"])
+        row["usd"] += leaf_cost(model, leaf) or 0.0
+        if kind == "sub":
+            row["subagents"] += leaf["starts"]
+            row["sub"] += tokens
+
+    for session, row in found.items():
+        known = state["titles"].get(session) or {}
+        row["title"] = known.get("title") or session[:8]
+        row["exists"] = bool(known.get("path")) and Path(known["path"]).exists()
+
+    rows = sorted(found.values(), key=lambda row: -row["tokens"])
+    return {**window, "project": project, "name": project_names([project])[project], "sessions": rows}
+
+
 # SERVER
 
 
@@ -1103,6 +1895,26 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(build_state(self.scope, session, limit), since)
             return
 
+        if parsed.path == "/api/usage/status":
+            self.send_ok(usage_status())
+            return
+
+        if parsed.path == "/api/usage":
+            span = (query.get("span") or ["week"])[0]
+            at = (query.get("at") or [""])[0]
+            off = set(query.get("off") or [])
+            with _USAGE_LOCK:
+                self.send_ok(usage_report(usage_state(), span, at, off))
+            return
+
+        if parsed.path == "/api/usage/project":
+            span = (query.get("span") or ["week"])[0]
+            at = (query.get("at") or [""])[0]
+            project = (query.get("name") or [""])[0]
+            with _USAGE_LOCK:
+                self.send_ok(usage_sessions(usage_state(), span, at, project))
+            return
+
         if parsed.path == "/api/snippets":
             files = snippet_files()
             token = snippets_token(files)
@@ -1144,6 +1956,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/snippet/delete": self.erase_snippet,
             "/api/favourite": self.star_snippet,
             "/api/caffeine": self.set_caffeine,
+            "/api/usage/settings": self.set_usage_settings,
         }
         route = routes.get(urlparse(self.path).path)
         if not route:
@@ -1170,6 +1983,17 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         self.send_ok(start_caffeine(hours))
+
+    def set_usage_settings(self, payload: dict):
+        """The weekday and hour the quota week turns at."""
+        weekday = payload.get("weekday")
+        hour = payload.get("hour")
+        valid = weekday in WEEKDAYS and isinstance(hour, int) and 0 <= hour <= 23
+        if not valid:
+            self.send_bad()
+            return
+
+        self.send_ok(set_quota_reset(weekday, hour))
 
     def rename_project(self, payload: dict):
         slug = str(payload.get("slug") or "")
@@ -1257,6 +2081,18 @@ PAGE = r"""<!doctype html>
     --state-needs-you: #f0a03c;
     --state-ready: #85b06b;
     --state-error: #e06c62;
+
+    /* One colour per project in the usage panel, by lifetime rank. Never the
+       coral: that hue means Claude spoke. The rest share the last one. */
+    --series-1: #c0e021;
+    --series-2: #6fa8d6;
+    --series-3: #85b06b;
+    --series-4: #a98bd6;
+    --series-5: #e0b35c;
+    --series-6: #5fb3b3;
+    --series-7: #e07fa8;
+    --series-8: #9b8f84;
+    --series-rest: #6f665e;
 
     /* One hue per speaker: warm for people and Claude, cool for the machine. */
     --role-you: #6fa8d6;
@@ -1772,6 +2608,113 @@ PAGE = r"""<!doctype html>
     cursor: pointer; box-shadow: 0 6px 18px rgba(0,0,0,.45);
   }
   .jump.show { display: block; }
+
+  /* ---- usage ---- */
+  /* The third view. The rail trades its filter and tree for the range, the
+     projects and the milestones; the pane trades the feed for the panel. */
+  #rail .usage-only, #top .usage-only { display: none; }
+  body.usage #rail .sessions-only, body.usage #filter,
+  body.usage #tree, body.usage #favourites { display: none; }
+  body.usage #rail .usage-only { display: block; }
+  body.usage #top .usage-only { display: flex; }
+  body.usage #scroller, body.usage #library { display: none; }
+  body.usage #top .swatch, body.usage #copySid, body.usage #copyResume { display: none; }
+  body.usage #rail .scope.usage-only { display: flex; }
+  #usageDates { display: none; gap: 6px; margin-top: 8px; }
+  body.usage #usageDates.on { display: flex; }
+  #usageDates input, #usageSide select {
+    flex: 1; min-width: 0; padding: 5px 7px;
+    background: var(--code); color: var(--body); color-scheme: dark;
+    border: 1px solid var(--line); border-radius: 8px;
+    font: inherit; font-size: 12px;
+  }
+  #usageDates input:focus, #usageSide select:focus { outline: none; border-color: var(--accent); }
+  #usageSide { flex: 1; overflow-y: auto; padding: 4px 12px 24px; }
+  #usageSide .head {
+    margin: 14px 0 6px; font-size: 10px; letter-spacing: .09em; text-transform: uppercase;
+    color: var(--subtle); font-weight: 600;
+  }
+  #usageSide .pick {
+    display: flex; align-items: center; gap: 9px; padding: 3px 0;
+    font-size: 12.5px; color: var(--body); cursor: pointer; user-select: none;
+  }
+  #usageSide .pick .label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #usageSide .mark { display: flex; gap: 8px; padding: 3px 0; font-size: 12.5px; color: var(--body); }
+  #usageSide .mark .when { flex: none; color: var(--subtle); font-variant-numeric: tabular-nums; }
+  #usageSide .reset { display: flex; gap: 6px; }
+  #usageSide .none { font-size: 12px; color: var(--subtle); }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .s1 { --series: var(--series-1); } .s2 { --series: var(--series-2); }
+  .s3 { --series: var(--series-3); } .s4 { --series: var(--series-4); }
+  .s5 { --series: var(--series-5); } .s6 { --series: var(--series-6); }
+  .s7 { --series: var(--series-7); } .s8 { --series: var(--series-8); }
+  .s0 { --series: var(--series-rest); }
+  .dot { background: var(--series); }
+  .chart rect.bar { fill: var(--series); stroke: var(--panel); stroke-width: 1; }
+  #top .iconbtn:disabled { opacity: .35; cursor: default; }
+  #top .iconbtn:disabled:hover { color: var(--muted); background: none; border-color: transparent; }
+
+  #usage { display: none; flex: 1; min-height: 0; overflow-y: auto; }
+  body.usage #usage { display: block; }
+  #usage .body {
+    max-width: 1100px; margin: 0 auto; padding: 18px 22px 10vh;
+    display: flex; flex-direction: column; gap: 14px;
+  }
+  .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+  .stats.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .stat { min-width: 0; padding: 11px 15px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+  .stat .label { display: block; font-size: 12px; color: var(--muted); }
+  .stat b {
+    display: block; color: var(--heading); font-size: 22px; line-height: 1.3; font-weight: 600;
+    font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .stats.three b { font-size: 18px; }
+  .stat .pair { display: flex; gap: 18px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; min-width: 0; }
+  .chartbox { padding: 12px 12px 10px; }
+  .chart { display: block; max-width: 100%; }
+  .chart text { fill: var(--muted); font-size: 11.5px; font-family: inherit; }
+  .chart line.grid { stroke: var(--line); stroke-width: 1; }
+  .chart line.milestone { stroke: var(--accent); stroke-width: 1.5; stroke-dasharray: 4 3; }
+  .chart text.milestone { fill: var(--accent); }
+  .chart rect.dim { opacity: .3; }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 6px; font-size: 12px; color: var(--muted); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .rows { display: flex; flex-direction: column; }
+  .rows .row {
+    display: grid; align-items: center; gap: 10px; padding: 8px 14px;
+    border: 0; border-bottom: 1px solid var(--line); background: none;
+    color: var(--body); font: inherit; font-size: 13px; text-align: left; min-width: 0;
+  }
+  .rows .row:last-child { border-bottom: 0; }
+  .rows .row.head {
+    font-size: 10.5px; letter-spacing: .09em; text-transform: uppercase;
+    color: var(--muted); font-weight: 600;
+  }
+  .rows .row.project { grid-template-columns: minmax(0, 1.6fr) repeat(6, minmax(0, 1fr)); }
+  .rows .row.session { grid-template-columns: minmax(0, 2.4fr) repeat(5, minmax(0, 1fr)); }
+  .rows button.row { cursor: pointer; }
+  .rows button.row:hover { background: var(--panel-soft); }
+  .rows .num { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+  .rows .name {
+    display: flex; align-items: center; gap: 8px; min-width: 0;
+    color: var(--heading); font-weight: 600;
+  }
+  .rows .name span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rows .muted { color: var(--subtle); }
+  .rows .open {
+    display: block; padding: 0; border: 0; background: none; cursor: pointer;
+    color: var(--accent); font: inherit; font-size: 11.5px;
+  }
+  .rows .gone { display: block; color: var(--subtle); font-size: 11.5px; }
+  .back { align-self: flex-start; }
+  #usage .empty { padding: 40px 0; }
+  @media (max-width: 860px) {
+    .stats, .stats.three { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .rows .row.project { grid-template-columns: minmax(0, 1.6fr) repeat(3, minmax(0, 1fr)); }
+    .rows .row.project .wide, .rows .row.session .wide { display: none; }
+    .rows .row.session { grid-template-columns: minmax(0, 2fr) repeat(3, minmax(0, 1fr)); }
+  }
 </style>
 </head>
 <body>
@@ -1800,6 +2743,26 @@ PAGE = r"""<!doctype html>
       <button id="tabSessions" type="button" class="on" data-i18n="tabSessions"></button>
 
       <button id="tabLibrary" type="button" data-i18n="tabLibrary"></button>
+
+      <button id="tabUsage" type="button" data-i18n="tabUsage"></button>
+    </div>
+
+    <div class="scope usage-only" id="usageSpans">
+      <button type="button" data-span="day" data-i18n="spanDay"></button>
+
+      <button type="button" data-span="week" data-i18n="spanWeek"></button>
+
+      <button type="button" data-span="month" data-i18n="spanMonth"></button>
+
+      <button type="button" data-span="year" data-i18n="spanYear"></button>
+
+      <button type="button" data-span="custom" data-i18n="spanCustom"></button>
+    </div>
+
+    <div id="usageDates">
+      <input id="usageFrom" type="date" data-i18n-aria="fromDate">
+
+      <input id="usageTo" type="date" data-i18n-aria="toDate">
     </div>
 
     <input id="filter" type="search" data-i18n-ph="filterPlaceholder" autocomplete="off">
@@ -1834,6 +2797,8 @@ PAGE = r"""<!doctype html>
   <div id="favourites" class="sessions-only"></div>
 
   <nav id="tree"></nav>
+
+  <nav id="usageSide" class="usage-only"></nav>
 
   <div class="rail-foot">
     <div class="row">
@@ -1870,6 +2835,14 @@ PAGE = r"""<!doctype html>
 
       <span class="title" id="title" data-i18n="connecting"></span>
 
+      <button class="iconbtn usage-only" id="usagePrev" type="button" data-i18n-aria="previous">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>
+      </button>
+
+      <button class="iconbtn usage-only" id="usageNext" type="button" data-i18n-aria="following">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg>
+      </button>
+
       <button class="iconbtn" id="copySid" type="button" data-i18n-aria="copyIdLabel">
         <svg viewBox="0 0 24 24" aria-hidden="true">
           <rect x="9" y="9" width="11" height="11" rx="2"/>
@@ -1893,6 +2866,8 @@ PAGE = r"""<!doctype html>
   <main id="scroller">
     <div id="feed"><div class="empty" data-i18n="waiting"></div></div>
   </main>
+
+  <section id="usage"></section>
 
   <section id="library">
     <div class="empty" data-i18n="pickSnippet"></div>
@@ -2073,6 +3048,26 @@ const STRINGS = {
     palettePlaceholder: 'copiar um snippet… (enter copia)',
     keepAwake: 'manter acordado', keepAwakeHint: 'impedir o Mac de dormir',
     awakeFor: 'acordado · {time}', stopAwake: 'deixar dormir',
+    tabUsage: 'uso',
+    spanDay: 'dia', spanWeek: 'semana', spanMonth: 'mês', spanYear: 'ano', spanCustom: 'datas',
+    fromDate: 'de', toDate: 'até', previous: 'anterior', following: 'próximo',
+    usageProjects: 'projetos', usageMilestones: 'marcos', usageReset: 'a semana da cota começa',
+    usageWeek: 'semana {n}', usageCalls: '{n} chamadas', usageOnce: 'cada resposta contada uma vez',
+    usageIndexing: 'indexando… {n}%',
+    statTokens: 'tokens', statRead: 'cache lido', statWrite: 'cache escrito', statOutput: 'saída',
+    statApi: '≈ equivalente api',
+    statApiHint: 'preços da api em {date} · a assinatura não é cobrada por token',
+    unpriced: '{n} tokens sem preço na tabela',
+    indContext: 'contexto médio', indLarge: 'chamadas acima de 200k', indBase: 'base da sessão',
+    indContextHint: 'tokens de contexto por chamada',
+    indBaseHint: 'contexto da primeira chamada de cada sessão',
+    colProject: 'projeto', colShare: 'parte', colSub: 'subagentes', colLarge: 'acima de 200k',
+    colUsd: '≈ us$', colSession: 'sessão', colStarted: 'início', colMax: 'contexto máx',
+    allProjects: '‹ todos os projetos', openSession: 'abrir sessão', sessionGone: 'transcrição apagada',
+    otherSessions: '+ {n} outras sessões', others: 'outros',
+    noCalls: 'nenhuma chamada neste intervalo', noDataBefore: 'sem dados antes de {date}',
+    noUsageYet: 'nada indexado ainda', noMilestones: 'nenhum marco',
+    unitBillion: 'bi', unitMillion: 'mi', unitThousand: 'mil',
   },
   en: {
     filterPlaceholder: 'filter project or session',
@@ -2131,6 +3126,26 @@ const STRINGS = {
     palettePlaceholder: 'copy a snippet… (enter copies)',
     keepAwake: 'keep awake', keepAwakeHint: 'hold off sleep on this Mac',
     awakeFor: 'awake · {time}', stopAwake: 'let it sleep',
+    tabUsage: 'usage',
+    spanDay: 'day', spanWeek: 'week', spanMonth: 'month', spanYear: 'year', spanCustom: 'dates',
+    fromDate: 'from', toDate: 'to', previous: 'previous', following: 'next',
+    usageProjects: 'projects', usageMilestones: 'milestones', usageReset: 'the quota week starts',
+    usageWeek: 'week {n}', usageCalls: '{n} calls', usageOnce: 'each response counted once',
+    usageIndexing: 'indexing… {n}%',
+    statTokens: 'tokens', statRead: 'cache read', statWrite: 'cache write', statOutput: 'output',
+    statApi: '≈ api equivalent',
+    statApiHint: 'api list prices on {date} · the subscription is not billed by the token',
+    unpriced: '{n} tokens without a price in the table',
+    indContext: 'avg context', indLarge: 'calls over 200k', indBase: 'session base',
+    indContextHint: 'context tokens per call',
+    indBaseHint: 'context of the first call of each session',
+    colProject: 'project', colShare: 'share', colSub: 'subagents', colLarge: 'over 200k',
+    colUsd: '≈ us$', colSession: 'session', colStarted: 'started', colMax: 'max context',
+    allProjects: '‹ all projects', openSession: 'open session', sessionGone: 'transcript deleted',
+    otherSessions: '+ {n} other sessions', others: 'others',
+    noCalls: 'no calls in this range', noDataBefore: 'no data before {date}',
+    noUsageYet: 'nothing indexed yet', noMilestones: 'no milestones',
+    unitBillion: 'bn', unitMillion: 'm', unitThousand: 'k',
   },
 };
 
@@ -2842,6 +3857,12 @@ function drawTree() {
     return;
   }
 
+  // The usage view has no tree, so cmd+1..9 has nothing to jump to.
+  if (view === 'usage') {
+    visibleRows = [];
+    return;
+  }
+
   const needle = filter.value.trim().toLowerCase();
   const names = dayNames();
   tree.replaceChildren();
@@ -2969,6 +3990,7 @@ function setLang(next) {
   paintStar();
   drawTree();
   draw();
+  if (view === 'usage') drawUsage();
 }
 
 // KEEPING THE MAC AWAKE
@@ -3115,6 +4137,11 @@ function toggleFocus() {
 }
 
 function drawTop() {
+  if (view === 'usage') {
+    drawUsageTop();
+    return;
+  }
+
   if (view === 'library') {
     titleEl.textContent = t('tabLibrary');
     titleEl.title = '';
@@ -3515,8 +4542,10 @@ function drawLibraryTree() {
 
 function paintView() {
   document.body.classList.toggle('library', view === 'library');
+  document.body.classList.toggle('usage', view === 'usage');
   tabSessions.classList.toggle('on', view === 'sessions');
   tabLibrary.classList.toggle('on', view === 'library');
+  tabUsage.classList.toggle('on', view === 'usage');
   filter.placeholder = t(view === 'library' ? 'filterSnippets' : 'filterPlaceholder');
 }
 
@@ -3529,12 +4558,745 @@ function setView(next) {
   paintView();
   drawTop();
   drawTree();
+  if (view === 'usage') loadUsage();
 }
 
 function promote(text) {
   setView('library');
   newSnippet(text);
 }
+
+// USAGE
+
+const usagePane = document.getElementById('usage');
+const usageSide = document.getElementById('usageSide');
+const usageSpans = document.getElementById('usageSpans');
+const usageDates = document.getElementById('usageDates');
+const usageFrom = document.getElementById('usageFrom');
+const usageTo = document.getElementById('usageTo');
+const usagePrev = document.getElementById('usagePrev');
+const usageNext = document.getElementById('usageNext');
+const tabUsage = document.getElementById('tabUsage');
+
+const SERIES = 8;
+const SESSION_ROWS = 40;
+const WEEKDAY_KEYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
+
+// The window is the server's to work out: it knows the hour the quota week
+// turns at. The page keeps a moment inside the window it wants and the
+// neighbours the server handed back. An empty moment means now.
+let usageSpan = localStorage.getItem('pergula:usage-span') || 'week';
+let usageAt = '';
+let usageOff = new Set(JSON.parse(localStorage.getItem('pergula:usage-off') || '[]'));
+let usageReport = null;
+let usageProject = null;
+let usageDetail = null;
+let usageTimer = null;
+let usageRun = 0;
+
+function number(value, digits) {
+  const places = digits || 0;
+  return new Intl.NumberFormat(locale(), { minimumFractionDigits: places, maximumFractionDigits: places })
+    .format(value);
+}
+
+function tokens(value) {
+  if (value >= 1e9) return number(value / 1e9, 2) + ' ' + t('unitBillion');
+  if (value >= 1e7) return number(value / 1e6) + ' ' + t('unitMillion');
+  if (value >= 1e6) return number(value / 1e6, 1) + ' ' + t('unitMillion');
+  if (value >= 1e3) return number(value / 1e3) + ' ' + t('unitThousand');
+  return number(value);
+}
+
+function kilo(value) {
+  return number(Math.round(value / 1000)) + 'k';
+}
+
+function percent(value) {
+  return number(value) + '%';
+}
+
+function dollars(value) {
+  return 'us$ ' + number(value, value < 100 ? 2 : 0);
+}
+
+// An hour key, 2026-11-02T14, as the local moment it names.
+function fromKey(key) {
+  const [day, hour] = key.split('T');
+  const [year, month, date] = day.split('-').map(Number);
+  return new Date(year, month - 1, date, Number(hour || 0));
+}
+
+function toKey(when) {
+  const pad = (value) => String(value).padStart(2, '0');
+  return when.getFullYear() + '-' + pad(when.getMonth() + 1) + '-' + pad(when.getDate())
+    + 'T' + pad(when.getHours());
+}
+
+function lower(text) {
+  return text.toLocaleLowerCase(locale()).replace(/\./g, '');
+}
+
+function dayLabel(when, withYear) {
+  const options = { weekday: 'short', day: 'numeric', month: 'short' };
+  if (withYear) options.year = 'numeric';
+  return lower(when.toLocaleDateString(locale(), options));
+}
+
+function plainDay(when, withYear) {
+  const options = { day: 'numeric', month: 'short' };
+  if (withYear) options.year = 'numeric';
+  return lower(when.toLocaleDateString(locale(), options));
+}
+
+function hourLabel(when) {
+  return String(when.getHours()).padStart(2, '0') + ':00';
+}
+
+function monthLabel(when) {
+  return lower(when.toLocaleDateString(locale(), { month: 'long', year: 'numeric' }));
+}
+
+function windowLabel(report) {
+  const start = fromKey(report.start);
+  const end = fromKey(report.end);
+  const last = new Date(end.getTime() - 3600000);
+
+  if (report.span === 'day') return dayLabel(start, true);
+
+  if (report.span === 'week') {
+    return dayLabel(start) + ' ' + hourLabel(start) + ' – ' + dayLabel(end, true) + ' ' + hourLabel(end);
+  }
+
+  if (report.span === 'month') return monthLabel(start);
+
+  if (report.span === 'year') return String(start.getFullYear());
+
+  return plainDay(start) + ' – ' + plainDay(last, true);
+}
+
+function usageHeading() {
+  if (usageProject) return t('tabUsage') + ' · ' + (usageDetail ? usageDetail.name : '');
+
+  const report = usageReport;
+  if (!report) return t('tabUsage');
+
+  if (report.span === 'week') return t('tabUsage') + ' · ' + t('usageWeek', { n: report.week });
+
+  return t('tabUsage') + ' · ' + windowLabel(report);
+}
+
+// The colour of a project follows its rank over everything ever indexed, so
+// it does not change as the window moves.
+function seriesOf(path) {
+  const rank = usageReport ? usageReport.ranking.indexOf(path) : -1;
+  const ranked = rank >= 0 && rank < SERIES;
+  return ranked ? 's' + (rank + 1) : 's0';
+}
+
+function dot(path) {
+  const mark = document.createElement('span');
+  mark.className = 'dot ' + seriesOf(path);
+  return mark;
+}
+
+function drawUsageTop() {
+  titleEl.textContent = usageHeading();
+  titleEl.title = '';
+  const report = usageReport;
+  usagePrev.disabled = !report || !report.prev;
+  usageNext.disabled = !report || !report.next;
+  if (!report) {
+    metaEl.textContent = '';
+    return;
+  }
+
+  const parts = [windowLabel(report), t('usageCalls', { n: number(report.totals.calls) }), t('usageOnce')];
+  const status = report.status;
+  const indexing = !status.ready && status.total;
+  if (indexing) parts.push(t('usageIndexing', { n: Math.floor(100 * status.done / status.total) }));
+
+  metaEl.textContent = parts.join('  ·  ');
+}
+
+function head(text) {
+  const label = document.createElement('div');
+  label.className = 'head';
+  label.textContent = text;
+  return label;
+}
+
+function none(text) {
+  const empty = document.createElement('div');
+  empty.className = 'none';
+  empty.textContent = text;
+  return empty;
+}
+
+function projectPick(row) {
+  const pick = document.createElement('label');
+  pick.className = 'pick';
+  pick.title = row.path;
+
+  const box = document.createElement('input');
+  box.type = 'checkbox';
+  box.checked = row.on;
+  box.addEventListener('change', () => {
+    if (box.checked) usageOff.delete(row.path);
+    if (!box.checked) usageOff.add(row.path);
+    localStorage.setItem('pergula:usage-off', JSON.stringify([...usageOff]));
+    loadUsage();
+  });
+  pick.appendChild(box);
+
+  const name = document.createElement('span');
+  name.className = 'label';
+  name.textContent = row.name;
+  pick.appendChild(name);
+
+  pick.appendChild(dot(row.path));
+  return pick;
+}
+
+function shortDay(day) {
+  return day.slice(8, 10) + '/' + day.slice(5, 7) + '/' + day.slice(2, 4);
+}
+
+function weekdayName(index) {
+  // 2026-11-02 was a Monday; the names come from the locale, not a table.
+  const when = new Date(2026, 10, 2 + index);
+  return lower(when.toLocaleDateString(locale(), { weekday: 'long' }));
+}
+
+function resetPicker(settings) {
+  const row = document.createElement('div');
+  row.className = 'reset';
+
+  const weekday = document.createElement('select');
+  WEEKDAY_KEYS.forEach((key, index) => {
+    const option = document.createElement('option');
+    option.value = key;
+    option.textContent = weekdayName(index);
+    option.selected = key === settings.weekday;
+    weekday.appendChild(option);
+  });
+
+  const hour = document.createElement('select');
+  for (let value = 0; value < 24; value += 1) {
+    const option = document.createElement('option');
+    option.value = String(value);
+    option.textContent = String(value).padStart(2, '0') + ':00';
+    option.selected = value === settings.hour;
+    hour.appendChild(option);
+  }
+
+  const send = () => {
+    fetch('/api/usage/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ weekday: weekday.value, hour: Number(hour.value) }),
+    }).then(() => loadUsage()).catch(() => null);
+  };
+  weekday.addEventListener('change', send);
+  hour.addEventListener('change', send);
+
+  row.appendChild(weekday);
+  row.appendChild(hour);
+  return row;
+}
+
+function drawUsageSide() {
+  usageSide.replaceChildren();
+  const report = usageReport;
+  if (!report) return;
+
+  usageSide.appendChild(head(t('usageProjects')));
+  for (const row of report.projects) usageSide.appendChild(projectPick(row));
+  if (!report.projects.length) usageSide.appendChild(none(t('noCalls')));
+
+  usageSide.appendChild(head(t('usageMilestones')));
+  const marks = report.milestones.slice().reverse().slice(0, 12);
+  for (const mark of marks) {
+    const line = document.createElement('div');
+    line.className = 'mark';
+
+    const when = document.createElement('span');
+    when.className = 'when';
+    when.textContent = shortDay(mark.day);
+    line.appendChild(when);
+
+    const what = document.createElement('span');
+    what.textContent = mark.label;
+    line.appendChild(what);
+    usageSide.appendChild(line);
+  }
+  if (!marks.length) usageSide.appendChild(none(t('noMilestones')));
+
+  usageSide.appendChild(head(t('usageReset')));
+  usageSide.appendChild(resetPicker(report.settings));
+}
+
+function paintSpans() {
+  for (const button of usageSpans.querySelectorAll('button')) {
+    button.classList.toggle('on', button.dataset.span === usageSpan);
+  }
+
+  usageDates.classList.toggle('on', usageSpan === 'custom');
+}
+
+function stat(label, value, hint) {
+  const card = document.createElement('div');
+  card.className = 'stat';
+  if (hint) card.title = hint;
+
+  const name = document.createElement('span');
+  name.className = 'label';
+  name.textContent = label;
+  card.appendChild(name);
+
+  const figure = document.createElement('b');
+  figure.textContent = value;
+  card.appendChild(figure);
+  return card;
+}
+
+function pairStat(first, second) {
+  const card = document.createElement('div');
+  card.className = 'stat';
+  const pair = document.createElement('div');
+  pair.className = 'pair';
+  for (const [label, value] of [first, second]) {
+    const half = stat(label, value);
+    half.className = '';
+    pair.appendChild(half);
+  }
+  card.appendChild(pair);
+  return card;
+}
+
+function drawStats(report) {
+  const totals = report.totals;
+  const figures = document.createElement('div');
+  figures.className = 'stats';
+
+  figures.appendChild(stat(t('statTokens'), tokens(totals.tokens)));
+  figures.appendChild(stat(t('statRead'), tokens(totals.cache_read)));
+  figures.appendChild(pairStat([t('statWrite'), tokens(totals.cache_write)],
+    [t('statOutput'), tokens(totals.output)]));
+
+  let hint = t('statApiHint', { date: plainDay(fromKey(report.prices + 'T00'), true) });
+  if (totals.unpriced) hint += '\n' + t('unpriced', { n: tokens(totals.unpriced) });
+  figures.appendChild(stat(t('statApi'), dollars(totals.usd), hint));
+
+  const signs = document.createElement('div');
+  signs.className = 'stats three';
+  const found = report.indicators;
+  signs.appendChild(stat(t('indContext'), kilo(found.context), t('indContextHint')));
+  signs.appendChild(stat(t('indLarge'), percent(found.large)));
+  signs.appendChild(stat(t('indBase'), kilo(found.base), t('indBaseHint')));
+
+  return [figures, signs];
+}
+
+function niceCeiling(value) {
+  const magnitude = Math.pow(10, Math.floor(Math.log10(value)));
+  const step = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10].find((each) => each * magnitude >= value * 1.04);
+  return (step || 10) * magnitude;
+}
+
+function barLabels(report, bar, index) {
+  const when = fromKey(bar.start);
+  if (report.unit === 'hour') return [String(when.getHours()).padStart(2, '0'), ''];
+
+  if (report.unit === 'month') return [lower(when.toLocaleDateString(locale(), { month: 'short' })), ''];
+
+  if (report.span === 'week') {
+    return [lower(when.toLocaleDateString(locale(), { weekday: 'short' })), String(when.getDate())];
+  }
+
+  const opensMonth = index === 0 || when.getDate() === 1;
+  const month = opensMonth ? lower(when.toLocaleDateString(locale(), { month: 'short' })) : '';
+  return [String(when.getDate()), month];
+}
+
+// The bar a milestone day falls in, or -1 when the day is outside the window.
+function milestoneBar(report, day) {
+  const opens = day + 'T00';
+  const closes = toKey(new Date(fromKey(opens).getTime() + 86400000));
+  const outside = closes <= report.start || opens >= report.end;
+  if (outside) return -1;
+
+  const from = opens > report.start ? opens : report.start;
+  let found = 0;
+  report.bars.forEach((bar, index) => {
+    if (bar.start <= from) found = index;
+  });
+  return found;
+}
+
+function emptyText(report) {
+  if (!report.first) return t(report.status.ready ? 'noUsageYet' : 'loading');
+
+  const before = report.end <= report.first;
+  if (before) return t('noDataBefore', { date: plainDay(fromKey(report.first), true) });
+
+  return t('noCalls');
+}
+
+function svgNode(name, attributes, text) {
+  const node = document.createElementNS('http://www.w3.org/2000/svg', name);
+  for (const [key, value] of Object.entries(attributes)) node.setAttribute(key, value);
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+// Stacked bars in plain SVG: the page fetches no library. The heaviest
+// projects of all time get a colour each; the rest stack as one.
+function drawChart(report, box) {
+  const width = Math.max(280, Math.floor(box.clientWidth || 600));
+  const height = 230;
+  const marks = report.milestones
+    .map((mark) => ({ mark, bar: milestoneBar(report, mark.day) }))
+    .filter((entry) => entry.bar >= 0);
+  const left = 52;
+  const right = 8;
+  const top = marks.length ? 22 : 10;
+  const bottom = 36;
+  const inner = height - top - bottom;
+  const slot = (width - left - right) / report.bars.length;
+  const thick = Math.max(2, Math.min(44, slot * 0.62));
+  const peak = Math.max(...report.bars.map((bar) => Object.values(bar.values).reduce((a, b) => a + b, 0)), 0);
+  const ceiling = peak ? niceCeiling(peak) : 1;
+  const y = (value) => top + inner - value / ceiling * inner;
+
+  const svg = svgNode('svg', { class: 'chart', width, height, viewBox: '0 0 ' + width + ' ' + height,
+    role: 'img', 'aria-label': usageHeading() });
+
+  for (let step = 0; step <= 4; step += 1) {
+    const level = top + inner - step * inner / 4;
+    svg.appendChild(svgNode('line', { class: 'grid', x1: left, x2: width - right, y1: level, y2: level }));
+    if (step && peak) {
+      svg.appendChild(svgNode('text', { x: left - 6, y: level + 4, 'text-anchor': 'end' },
+        tokens(ceiling * step / 4)));
+    }
+  }
+
+  const order = report.ranking.slice(0, SERIES);
+  report.bars.forEach((bar, index) => {
+    const x = left + slot * index + (slot - thick) / 2;
+    const rest = Object.entries(bar.values)
+      .filter(([path]) => !order.includes(path))
+      .reduce((sum, [, value]) => sum + value, 0);
+    const layers = order.map((path) => [path, bar.values[path] || 0]).concat([['', rest]]);
+    const dim = report.span === 'day' ? false : bar.start > report.now;
+    let stacked = 0;
+
+    for (const [path, value] of layers) {
+      if (!value) continue;
+      const rect = svgNode('rect', {
+        class: 'bar ' + (path ? seriesOf(path) : 's0') + (dim ? ' dim' : ''),
+        x: x.toFixed(1), y: y(stacked + value).toFixed(1), width: thick.toFixed(1),
+        height: Math.max(0.5, y(stacked) - y(stacked + value)).toFixed(1),
+      });
+      const named = report.projects.find((row) => row.path === path);
+      rect.appendChild(svgNode('title', {}, (named ? named.name : t('others')) + ' · ' + tokens(value)));
+      svg.appendChild(rect);
+      stacked += value;
+    }
+  });
+
+  const every = Math.max(1, Math.ceil(34 / slot));
+  report.bars.forEach((bar, index) => {
+    if (index % every) return;
+    const centre = left + slot * (index + 0.5);
+    const [first, second] = barLabels(report, bar, index);
+    svg.appendChild(svgNode('text', { x: centre.toFixed(1), y: height - bottom + 16, 'text-anchor': 'middle' }, first));
+    if (second) {
+      svg.appendChild(svgNode('text', { x: centre.toFixed(1), y: height - bottom + 30, 'text-anchor': 'middle' }, second));
+    }
+  });
+
+  for (const { mark, bar } of marks) {
+    const centre = left + slot * bar + (report.span === 'day' ? 0 : slot / 2);
+    const flip = centre > width - 110;
+    svg.appendChild(svgNode('line', { class: 'milestone', x1: centre, x2: centre, y1: top - 6, y2: top + inner }));
+    svg.appendChild(svgNode('text', { class: 'milestone', x: centre + (flip ? -5 : 5), y: 12,
+      'text-anchor': flip ? 'end' : 'start' }, mark.label));
+  }
+
+  if (!peak) {
+    svg.appendChild(svgNode('text', { x: left + (width - left - right) / 2, y: top + inner / 2,
+      'text-anchor': 'middle' }, emptyText(report)));
+  }
+
+  box.replaceChildren(svg);
+}
+
+function legend(report) {
+  const list = document.createElement('div');
+  list.className = 'legend';
+  const shown = report.projects.filter((row) => row.on && row.tokens);
+  for (const row of shown) {
+    const item = document.createElement('span');
+    item.appendChild(dot(row.path));
+    item.appendChild(document.createTextNode(row.name));
+    list.appendChild(item);
+  }
+  return list;
+}
+
+function cell(text, classes) {
+  const part = document.createElement('span');
+  part.className = classes === undefined ? 'num' : classes;
+  part.textContent = text;
+  return part;
+}
+
+function headRow(kind, labels) {
+  const row = document.createElement('div');
+  row.className = 'row head ' + kind;
+  labels.forEach(([text, classes]) => row.appendChild(cell(text, classes)));
+  return row;
+}
+
+function projectTable(report) {
+  const rows = report.projects.filter((row) => row.on && row.tokens);
+  if (!rows.length) return null;
+
+  const table = document.createElement('div');
+  table.className = 'card rows';
+  table.appendChild(headRow('project', [
+    [t('colProject'), ''], [t('statTokens'), 'num'], [t('colShare'), 'num wide'],
+    [t('colSub'), 'num wide'], [t('indContext'), 'num'], [t('colLarge'), 'num wide'], [t('colUsd'), 'num'],
+  ]));
+
+  for (const row of rows) {
+    const line = document.createElement('button');
+    line.type = 'button';
+    line.className = 'row project';
+    line.title = row.path;
+
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.appendChild(dot(row.path));
+    name.appendChild(cell(row.name, ''));
+    line.appendChild(name);
+
+    line.appendChild(cell(tokens(row.tokens)));
+    line.appendChild(cell(percent(row.share), 'num wide'));
+    line.appendChild(cell(percent(row.sub), 'num wide'));
+    line.appendChild(cell(kilo(row.context)));
+    line.appendChild(cell(percent(row.large), 'num wide'));
+    line.appendChild(cell(number(row.usd, row.usd < 100 ? 2 : 0)));
+    line.addEventListener('click', () => openUsageProject(row.path));
+    table.appendChild(line);
+  }
+
+  return table;
+}
+
+function sessionTitle(row) {
+  const name = document.createElement('span');
+  name.className = 'name';
+
+  const stack = document.createElement('span');
+  stack.appendChild(cell(row.title, ''));
+  if (row.exists) {
+    const open = document.createElement('button');
+    open.type = 'button';
+    open.className = 'open';
+    open.textContent = t('openSession');
+    open.addEventListener('click', () => {
+      setView('sessions');
+      onPick(row.id);
+    });
+    stack.appendChild(open);
+  }
+  if (!row.exists) stack.appendChild(cell(t('sessionGone'), 'gone'));
+
+  name.appendChild(stack);
+  return name;
+}
+
+function sessionTable(detail) {
+  const table = document.createElement('div');
+  table.className = 'card rows';
+  table.appendChild(headRow('session', [
+    [t('colSession'), ''], [t('colStarted'), 'num wide'], [t('statTokens'), 'num'],
+    [t('colSub'), 'num wide'], [t('colMax'), 'num'], [t('colUsd'), 'num'],
+  ]));
+
+  for (const row of detail.sessions.slice(0, SESSION_ROWS)) {
+    const line = document.createElement('div');
+    line.className = 'row session';
+    line.title = row.id;
+    line.appendChild(sessionTitle(row));
+    line.appendChild(cell(plainDay(fromKey(row.first)), 'num wide'));
+    line.appendChild(cell(tokens(row.tokens)));
+    line.appendChild(cell(number(row.subagents), 'num wide'));
+    line.appendChild(cell(kilo(row.context)));
+    line.appendChild(cell(number(row.usd, row.usd < 100 ? 2 : 0)));
+    table.appendChild(line);
+  }
+
+  const rest = detail.sessions.slice(SESSION_ROWS);
+  if (!rest.length) return table;
+
+  const line = document.createElement('div');
+  line.className = 'row session';
+  line.appendChild(cell(t('otherSessions', { n: rest.length }), 'muted'));
+  line.appendChild(cell('', 'num wide'));
+  line.appendChild(cell(tokens(rest.reduce((sum, row) => sum + row.tokens, 0)), 'num muted'));
+  table.appendChild(line);
+  return table;
+}
+
+function drawUsagePane() {
+  const report = usageReport;
+  const body = document.createElement('div');
+  body.className = 'body';
+  usagePane.replaceChildren(body);
+  if (!report) {
+    const waiting = document.createElement('div');
+    waiting.className = 'empty';
+    waiting.textContent = t('loading');
+    body.appendChild(waiting);
+    return;
+  }
+
+  if (usageProject) {
+    const leave = document.createElement('button');
+    leave.type = 'button';
+    leave.className = 'copy back';
+    leave.textContent = t('allProjects');
+    leave.addEventListener('click', closeUsageProject);
+    body.appendChild(leave);
+    if (usageDetail) body.appendChild(sessionTable(usageDetail));
+    return;
+  }
+
+  for (const block of drawStats(report)) body.appendChild(block);
+
+  const card = document.createElement('div');
+  card.className = 'card chartbox';
+  const box = document.createElement('div');
+  card.appendChild(box);
+  card.appendChild(legend(report));
+  body.appendChild(card);
+  drawChart(report, box);
+
+  const table = projectTable(report);
+  if (table) body.appendChild(table);
+}
+
+function drawUsage() {
+  paintSpans();
+  drawUsageTop();
+  drawUsageSide();
+  drawUsagePane();
+}
+
+function usageQuery() {
+  const parts = ['span=' + encodeURIComponent(usageSpan), 'at=' + encodeURIComponent(usageAt)];
+  for (const path of usageOff) parts.push('off=' + encodeURIComponent(path));
+  return parts.join('&');
+}
+
+// Asked again every minute while the panel is open, and every two seconds
+// while the first pass is still reading.
+async function loadUsage() {
+  const run = ++usageRun;
+  clearTimeout(usageTimer);
+  if (view !== 'usage') return;
+
+  try {
+    const response = await fetch('/api/usage?' + usageQuery());
+    const report = await response.json();
+    if (run !== usageRun) return;
+    usageReport = report;
+    if (usageProject) await loadUsageProject(run);
+    if (run !== usageRun) return;
+    drawUsage();
+  } catch (error) { /* the server is down; the timer tries again */ }
+
+  const indexing = usageReport && !usageReport.status.ready;
+  usageTimer = setTimeout(loadUsage, indexing ? 2000 : 60000);
+}
+
+async function loadUsageProject(run) {
+  const response = await fetch('/api/usage/project?' + usageQuery() + '&name=' + encodeURIComponent(usageProject));
+  const detail = await response.json();
+  if (run !== usageRun) return;
+  usageDetail = detail;
+}
+
+function openUsageProject(path) {
+  usageProject = path;
+  usageDetail = null;
+  loadUsage();
+}
+
+function closeUsageProject() {
+  usageProject = null;
+  usageDetail = null;
+  drawUsage();
+}
+
+function setSpan(span) {
+  usageSpan = span;
+  localStorage.setItem('pergula:usage-span', span);
+  usageAt = '';
+  const custom = span === 'custom';
+  if (custom) usageAt = customRange();
+  paintSpans();
+  loadUsage();
+}
+
+// The dates default to the window on screen, so switching to them changes
+// nothing until a date is moved.
+function customRange() {
+  const report = usageReport;
+  if (!usageFrom.value && report) usageFrom.value = report.start.slice(0, 10);
+  if (!usageTo.value && report) usageTo.value = toKey(new Date(fromKey(report.end).getTime() - 3600000)).slice(0, 10);
+
+  return usageFrom.value + '..' + usageTo.value;
+}
+
+function stepUsage(target) {
+  if (!target) return;
+
+  usageAt = target;
+  const custom = usageSpan === 'custom';
+  if (custom) {
+    const [from, to] = target.split('..');
+    usageFrom.value = from;
+    usageTo.value = to;
+  }
+  loadUsage();
+}
+
+usageSpans.addEventListener('click', (event) => {
+  const button = event.target.closest('button[data-span]');
+  if (!button) return;
+
+  setSpan(button.dataset.span);
+});
+
+for (const field of [usageFrom, usageTo]) {
+  field.addEventListener('change', () => {
+    usageAt = customRange();
+    loadUsage();
+  });
+}
+
+usagePrev.addEventListener('click', () => stepUsage(usageReport && usageReport.prev));
+usageNext.addEventListener('click', () => stepUsage(usageReport && usageReport.next));
+tabUsage.addEventListener('click', () => setView('usage'));
+
+window.addEventListener('resize', () => {
+  const charted = view === 'usage' && usageReport && !usageProject;
+  if (charted) drawUsagePane();
+});
 
 // PALETTE
 
@@ -4281,6 +6043,10 @@ def main() -> None:
         sys.exit(f"pergula: cannot bind {address} — {error}")
 
     adopt_caffeine()
+
+    # The first pass reads every transcript and takes a while; the page shows
+    # its progress and the reader never waits on it.
+    threading.Thread(target=usage_loop, name="usage", daemon=True).start()
 
     started = time.time()
     index = build_index(Handler.scope)

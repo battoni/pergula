@@ -80,6 +80,24 @@ Bubble tints: `--tint-you` `#171d24` · `--tint-claude` `#1f1a17` · `--tint-too
 `#d97757` is Anthropic's coral and is used **because it means Claude**. It is not
 a brand colour for pergula, and it never becomes one.
 
+## Series — one colour per project in the usage panel
+
+By rank over the last thirty days, then all time, so the projects being worked
+on get a colour and moving the window does not repaint them. The rest share the
+last value. The coral is not among them: it means Claude spoke.
+
+| Token | Value |
+| --- | --- |
+| `--series-1` | `#c0e021` |
+| `--series-2` | `#6fa8d6` |
+| `--series-3` | `#85b06b` |
+| `--series-4` | `#a98bd6` |
+| `--series-5` | `#e0b35c` |
+| `--series-6` | `#5fb3b3` |
+| `--series-7` | `#e07fa8` |
+| `--series-8` | `#9b8f84` |
+| `--series-rest` | `#6f665e` |
+
 ## Typography
 
 | Use | Stack |

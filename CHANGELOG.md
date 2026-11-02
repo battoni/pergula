@@ -6,6 +6,16 @@ Notable changes to pergula. Newest first.
 
 ### Added
 
+- **A usage tab**: tokens by project and by day, week, month, year or a range of
+  dates, counting each response once — not once per line, which is how a total
+  comes out doubled. The week follows the quota, Saturday 14:00 by default and
+  set in the sidebar. Four numbers (tokens, cache read, cache write and output,
+  ≈ api equivalent in dollars from a dated price table), three indicators
+  (average context, calls over 200k, session base), a stacked bar chart with
+  automatic milestones for a new leading model or Claude Code version, a table
+  by project and each project's sessions, which open in the reader. Worktrees
+  sum in their repository and subagents in their session. The sums live in
+  `~/.claude/pergula-usage.json` and outlive the CLI's thirty-day cleanup.
 - **Waiting on a shell**, a fifth light. A turn that ends with a shell it is
   waiting on (a CI watch, a build) turns the row purple instead of green, since
   nothing is yours to do yet; it goes back to working when the shell finishes
