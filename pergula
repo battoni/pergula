@@ -109,7 +109,7 @@ CAFFEINE_LIMIT = 12
 # from. Hours rather than days, because the quota week turns at an hour of a
 # weekday and a day-sized sum cannot be cut there.
 USAGE_PATH = Path.home() / ".claude" / "pergula-usage.json"
-USAGE_VERSION = 2
+USAGE_VERSION = 3
 USAGE_INTERVAL = 120
 USAGE_SAVE_EVERY = 40
 
@@ -117,9 +117,9 @@ USAGE_SAVE_EVERY = 40
 # whole stretches of history into other files: a continued session starts with
 # its predecessor's, and a forked subagent with its parent's. So the ids counted
 # are kept for everything, by the local day the response was made, for as long
-# as a transcript holding it can still exist. The output a response reported is
-# kept beside its id, because the first of its lines carries only part of it.
-USAGE_SEEN_DAYS = 35
+# as a transcript holding that day exists. Beside each id go the output it
+# reported, since the first of its lines carries only part of it, and the hour
+# it was counted in, where the rest of that output belongs.
 
 # Past this many tokens of context a call is a long one; the share of those is
 # one of the three indicators.
@@ -1117,7 +1117,7 @@ def load_usage() -> dict:
         set_aside_usage()
         return fresh_usage()
 
-    earlier = isinstance(data, dict) and data.get("version") == 1
+    earlier = isinstance(data, dict) and data.get("version") in (1, 2)
     if earlier:
         data = migrate_usage(data)
 
@@ -1137,9 +1137,12 @@ def load_usage() -> dict:
 
 def migrate_usage(data: dict) -> dict:
     """Version 1 counted an id once per file, so a response copied into another
-    file was counted again. Every session whose transcript still exists is
-    dropped and read afresh; the ones the CLI has deleted stay as they were,
-    since nothing is left to read them from."""
+    file was counted again; version 2 kept too little beside each id. Every
+    session whose transcript still exists is dropped and read afresh; the ones
+    the CLI has deleted stay as they were, since nothing is left to read them
+    from. Two things that cannot be told apart stay approximate: a deleted
+    session whose history a living one copied is counted in both, and a day
+    that mixes kept and re-read sessions loses the kept ones' version counts."""
     hours = data.get("hours")
     versions = data.get("versions")
     shaped = isinstance(hours, dict) and isinstance(versions, dict)
@@ -1435,29 +1438,49 @@ def leaf_of(state: dict, project: str, session: str, kind: str, call: dict) -> d
 
 def count_call(state: dict, project: str, session: str, kind: str, call: dict, entry: dict) -> None:
     """A response seen for the first time is a call. Seen again, it is a call
-    already counted, and only output it did not report before is added: the
-    first of its lines carries the opening tokens of the output, the last the
-    whole of it. Everything else in its usage is the same on every line."""
-    day = state["seen"].setdefault(call["hour"][:10], {})
-    before = day.get(call["key"])
+    already counted, and only output it did not report before is added, in the
+    hour it was counted in: the first of its lines carries the opening tokens of
+    the output, the last the whole of it. Everything else in its usage is the
+    same on every line. A file whose first response is a copy has no base of
+    its own: what it starts from is the history it inherited."""
+    first = not entry.get("started")
+    entry["started"] = True
+    entry["oldest"] = min(entry.get("oldest") or call["hour"][:10], call["hour"][:10])
+
+    day, before = seen_response(state["seen"], call)
     if before is None:
-        day[call["key"]] = call["output"]
-        first = not entry.get("started")
-        entry["started"] = True
+        state["seen"].setdefault(day, {})[call["key"]] = [call["output"], call["hour"][11:]]
         add_call(state, project, session, kind, call, first)
         return
 
-    grown = call["output"] - before
+    grown = call["output"] - before[0]
     if grown <= 0:
         return
 
-    day[call["key"]] = call["output"]
-    leaf_of(state, project, session, kind, call)["output"] += grown
+    before[0] = call["output"]
+    counted = {**call, "hour": day + "T" + before[1]}
+    leaf_of(state, project, session, kind, counted)["output"] += grown
+
+
+def seen_response(seen: dict, call: dict) -> tuple[str, list | None]:
+    """Where a response was counted, if it was. Each line of a response carries
+    its own time, so one begun before midnight can end after it."""
+    day = call["hour"][:10]
+    eve = (datetime.strptime(day, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+    for candidate in (day, eve):
+        found = seen.get(candidate, {}).get(call["key"])
+        if found is not None:
+            return candidate, found
+
+    return day, None
 
 
 def forget_seen(state: dict) -> None:
-    """Past this, no transcript is left to copy a response from."""
-    oldest = (datetime.now() - timedelta(days=USAGE_SEEN_DAYS)).strftime("%Y-%m-%d")
+    """A day no transcript holds anymore has nothing left to copy from. The CLI
+    deletes a transcript by when it was last written, not by when its responses
+    were made, so a long session keeps old days alive until it goes."""
+    held = [entry["oldest"] for entry in state["files"].values() if entry.get("oldest")]
+    oldest = min(held, default=datetime.now().strftime("%Y-%m-%d"))
     for day in [day for day in state["seen"] if day < oldest]:
         del state["seen"][day]
 
