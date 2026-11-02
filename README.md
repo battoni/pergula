@@ -206,8 +206,13 @@ reads the files and sums them, the way the sidebar already reads them to list
 the sessions.
 
 Each response counts once. The CLI writes a response over several lines that
-repeat its `message.id` and its `usage`; adding up lines instead of responses
-is how a total comes out roughly twice the truth.
+repeat its `message.id`, and copies whole stretches of history into other
+files: a continued session starts with the one it continues, a forked subagent
+with its parent's conversation. Adding up lines instead of responses is how a
+total comes out roughly twice the truth. So the ids already counted are kept,
+across every file, for as long as a transcript holding them can exist, and a
+copy counts where the response was made. The output is the last line's: the
+first carries only the opening tokens of it.
 
 - **The week is the quota's.** It runs from Saturday 14:00 to Saturday 14:00,
   local time, and the day and hour are a setting at the bottom of the sidebar.

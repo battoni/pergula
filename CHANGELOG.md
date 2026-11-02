@@ -7,8 +7,9 @@ Notable changes to pergula. Newest first.
 ### Added
 
 - **A usage tab**: tokens by project and by day, week, month, year or a range of
-  dates, counting each response once — not once per line, which is how a total
-  comes out doubled. The week follows the quota, Saturday 14:00 by default and
+  dates, counting each response once — not once per line, and not again in
+  the files the CLI copies history into (a continued session, a forked
+  subagent), which is how a total comes out doubled. The week follows the quota, Saturday 14:00 by default and
   set in the sidebar. Four numbers (tokens, cache read, cache write and output,
   ≈ api equivalent in dollars from a dated price table), three indicators
   (average context, calls over 200k, session base), a stacked bar chart with
