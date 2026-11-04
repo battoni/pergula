@@ -102,7 +102,9 @@ everything.
 
 A sidebar groups every session by project. Sessions carry the name and the colour
 you gave them with `/rename` and `/color`, because the CLI writes both into the
-transcript. **active** sessions are the ones with a Claude process open in a
+transcript. An active session with no `/rename` takes the name its terminal tab
+shows, without the project in front of it — the tab-status hooks below keep the
+two apart, and the group the row sits in already names the project. **active** sessions are the ones with a Claude process open in a
 terminal right now — read from the CLI's own per-pid registry in `~/.claude/sessions`, not
 guessed from the process table.
 
