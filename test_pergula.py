@@ -364,6 +364,49 @@ class SessionTitle(TempTranscript):
         self.assertEqual(pergula.session_meta(self.path)["title"], "second")
 
 
+class TabTitle(TempTranscript):
+    """The terminal tab names a live session after its project; the sidebar
+    shows the name without the project, since the group already says it."""
+
+    def index(self, tab):
+        running = {"pid": 1, "status": "idle", "state": "ready", "subagents": 0, "tab": tab}
+        live = {self.path.stem: running}
+        transcripts = unittest.mock.patch.object(pergula, "all_transcripts", return_value=[self.path])
+        sessions = unittest.mock.patch.object(pergula, "live_sessions", return_value=live)
+        with transcripts, sessions:
+            return pergula.build_index(None)["projects"][0]["sessions"][0]
+
+    def test_the_tab_name_beats_a_generated_title(self):
+        self.path.write_text(record("hello") + json.dumps({"type": "ai-title", "aiTitle": "generated"}) + "\n")
+        meta = self.index("3101 claude")
+
+        self.assertEqual(meta["title"], "3101 claude")
+        self.assertTrue(meta["renamed"])
+
+    def test_a_rename_in_the_transcript_still_wins(self):
+        self.path.write_text(record("hello") + json.dumps({"type": "custom-title", "customTitle": "mine"}) + "\n")
+
+        self.assertEqual(self.index("3101 claude")["title"], "mine")
+
+    def test_without_a_tab_name_nothing_changes(self):
+        self.path.write_text(record("hello") + json.dumps({"type": "ai-title", "aiTitle": "generated"}) + "\n")
+        meta = self.index("")
+
+        self.assertEqual(meta["title"], "generated")
+        self.assertFalse(meta["renamed"])
+
+    def test_the_tab_is_read_from_the_hooks_record(self):
+        self.assertEqual(pergula.tab_title({"tab": "  3101   claude "}), "3101 claude")
+        self.assertEqual(pergula.tab_title({"tab": 3101}), "")
+        self.assertEqual(pergula.tab_title({}), "")
+
+    def test_a_new_tab_name_changes_the_index_token(self):
+        before = {"abc-1": {"status": "idle", "state": "ready", "tab": "3101 claude"}}
+        after = {"abc-1": {"status": "idle", "state": "ready", "tab": "3185 claude"}}
+
+        self.assertNotEqual(pergula.live_stamp(before), pergula.live_stamp(after))
+
+
 class Blocks(TempTranscript):
     """Content arrives as a list of typed blocks, not only as a string."""
 
