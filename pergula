@@ -451,11 +451,13 @@ def live_sessions() -> dict:
 
         status = record.get("status") or ""
         state = agent_state(session, status)
+        hooks = agent_record(session)
         live[session] = {
             "pid": pid,
             "status": status,
             "state": state,
-            "subagents": subagents_behind(agent_record(session)) if state == "working" else 0,
+            "subagents": subagents_behind(hooks) if state == "working" else 0,
+            "tab": tab_title(hooks),
             "name": record.get("name") or "",
             "since": record.get("startedAt", 0) / 1000,
         }
@@ -475,6 +477,17 @@ def agent_record(session: str) -> dict:
         return {}
 
     return record if isinstance(record, dict) else {}
+
+
+def tab_title(record: dict) -> str:
+    """The name the terminal tab shows after the project: what `cc` was given,
+    or the /rename. The hooks keep it apart from the project prefix, which the
+    sidebar already says with the group the row sits in."""
+    tab = record.get("tab")
+    if not isinstance(tab, str):
+        return ""
+
+    return " ".join(tab.split())[:110]
 
 
 def subagents_behind(record: dict) -> int:
@@ -514,7 +527,7 @@ def agent_state(session: str, status: str) -> str:
 
 def live_stamp(live: dict) -> str:
     return ",".join(
-        f"{session}:{data['status']}:{data['state']}:{data.get('subagents', 0)}"
+        f"{session}:{data['status']}:{data['state']}:{data.get('subagents', 0)}:{data.get('tab', '')}"
         for session, data in sorted(live.items())
     )
 
@@ -816,6 +829,11 @@ def build_index(scope: Path | None) -> dict:
             continue
 
         running = live.get(meta["id"])
+        tab = running.get("tab", "") if running else ""
+        named_in_terminal = tab and not meta["customTitle"]
+        if named_in_terminal:
+            meta = {**meta, "title": tab, "renamed": True}
+
         meta = {
             **meta,
             "live": bool(running),
