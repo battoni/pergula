@@ -39,6 +39,7 @@ import time
 import unicodedata
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -1952,6 +1953,303 @@ def usage_sessions(state: dict, span: str, at: str, project: str) -> dict:
     return {**window, "project": project, "name": project_names([project])[project], "sessions": rows}
 
 
+# WORK
+#
+# The Work tab: one card per worktree of every repository a session ran in.
+# Read-only by design. git, the worktree's own record (.worktree.json), its
+# specs/ folder, Valet's site links and the transcripts are read; GitHub is
+# asked through `gh` and the answer kept five minutes. Nothing is fetched and
+# nothing is changed: tearing a worktree down stays with `make wt-down`, which
+# has the checks, so a card only offers that command to copy.
+
+# A Valet site is a link in this folder, named after its host minus the TLD.
+VALET_SITES = Path.home() / ".config" / "valet" / "Sites"
+PR_CACHE_SECONDS = 300
+IDLE_DAYS = 7
+WORK_RECORD = ".worktree.json"
+# Each card costs a few git calls and one gh call; one at a time, a machine with
+# fifty worktrees waited most of a minute for the first answer.
+WORK_THREADS = 8
+TEARDOWN_TARGET = re.compile(r"^wt-down:", re.MULTILINE)
+
+# (repository, branch) -> (asked at, pull requests or None when gh failed)
+_PULL_REQUESTS: dict[tuple[str, str], tuple[float, list | None]] = {}
+_PULL_REQUESTS_LOCK = threading.Lock()
+
+# transcript -> (signature, the working directories it names)
+_CWDS_CACHE: dict[str, tuple[str, set[str]]] = {}
+
+
+def git_output(where: str, *arguments: str) -> str | None:
+    """What git printed, or None when it failed or is not there."""
+    try:
+        probe = subprocess.run(["git", "-C", where, *arguments],
+                               capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+    if probe.returncode != 0:
+        return None
+
+    return probe.stdout
+
+
+def list_worktrees(repo: str) -> list[dict]:
+    """`git worktree list --porcelain` as {path, branch}, the main checkout first."""
+    text = git_output(repo, "worktree", "list", "--porcelain")
+    if text is None:
+        return []
+
+    found: list[dict] = []
+    for line in text.splitlines():
+        if line.startswith("worktree "):
+            found.append({"path": line[len("worktree "):], "branch": "", "bare": False})
+            continue
+
+        if not found:
+            continue
+
+        if line.startswith("branch refs/heads/"):
+            found[-1]["branch"] = line[len("branch refs/heads/"):]
+            continue
+
+        if line == "bare":
+            found[-1]["bare"] = True
+
+    return found
+
+
+def session_cwds(path: Path) -> set[str]:
+    """Every working directory a transcript names in its head and tail. A session
+    that moved into a worktree (EnterWorktree) names it only after the move."""
+    stamp = signature(path)
+    cached = _CWDS_CACHE.get(str(path))
+    fresh = cached is not None and cached[0] == stamp
+    if fresh:
+        return cached[1]
+
+    found: set[str] = set()
+    for chunk in (read_head(path), read_tail(path)):
+        for line in chunk:
+            for match in CWD_FIELD.finditer(line.encode("utf-8")):
+                try:
+                    found.add(json.loads(b'"' + match.group(1) + b'"'))
+                except ValueError:
+                    continue
+
+    _CWDS_CACHE[str(path)] = (stamp, found)
+    return found
+
+
+def inside(cwd: str, folder: str) -> bool:
+    return cwd == folder or cwd.startswith(folder.rstrip("/") + "/")
+
+
+def read_record(tree: Path) -> dict:
+    try:
+        record = json.loads((tree / WORK_RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+    return record if isinstance(record, dict) else {}
+
+
+def feature_of(tree: Path, feature: str) -> tuple[str, str]:
+    """(title, stage) from specs/<id>-*/: the intent's heading and the state's Stage line."""
+    folders = sorted((tree / "specs").glob(f"{feature}-*")) if feature else []
+    if not folders:
+        return "", ""
+
+    return heading_of(folders[0] / "intent.md"), stage_of(folders[0] / "state.md")
+
+
+def heading_of(path: Path) -> str:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+
+    heading = lines[0] if lines else ""
+    return re.sub(r"^#\s*(Intent:\s*)?", "", heading).strip()
+
+
+def stage_of(path: Path) -> str:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+
+    return next((line[len("Stage:"):].strip() for line in lines if line.startswith("Stage:")), "")
+
+
+def environment_of(record: dict) -> dict | None:
+    """The links, ports and database the record names, and whether Valet serves it."""
+    hosts = record.get("hosts") if isinstance(record.get("hosts"), dict) else {}
+    ports = record.get("ports") if isinstance(record.get("ports"), dict) else {}
+    api = hosts.get("api") or ""
+    app = hosts.get("app") or ""
+    if not api:
+        return None
+
+    vite = ports.get("vite")
+    site = VALET_SITES / api.rsplit(".", 1)[0]
+    linked = site.exists() or site.is_symlink()
+    return {
+        "app": f"https://{app}:{vite}" if app and vite else "",
+        "api": f"https://{api}",
+        "port": vite,
+        "e2e": ports.get("e2e"),
+        "database": record.get("database") or "",
+        "up": linked,
+    }
+
+
+def pull_requests(repo: str, branch: str) -> list | None:
+    """The branch's pull requests from `gh`, kept five minutes; None when gh fails."""
+    key = (repo, branch)
+    now = time.time()
+    with _PULL_REQUESTS_LOCK:
+        cached = _PULL_REQUESTS.get(key)
+
+    fresh = cached is not None and now - cached[0] < PR_CACHE_SECONDS
+    if fresh:
+        return cached[1]
+
+    prs = None
+    try:
+        probe = subprocess.run(
+            ["gh", "pr", "list", "--head", branch, "--state", "all", "--json", "number,state,mergedAt"],
+            cwd=repo, capture_output=True, text=True, timeout=15,
+        )
+        answered = probe.returncode == 0
+        prs = json.loads(probe.stdout) if answered else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        prs = None
+
+    prs = prs if isinstance(prs, list) else None
+    with _PULL_REQUESTS_LOCK:
+        _PULL_REQUESTS[key] = (now, prs)
+
+    return prs
+
+
+def work_status(prs: list | None, last_activity: float) -> tuple[str, str]:
+    """(active, merged or left, the reason), the same rules `make wt-gc` applies."""
+    merged = next((pr for pr in prs or [] if pr.get("state") == "MERGED"), None)
+    if merged:
+        return "merged", f"PR #{merged.get('number')} merged {merged.get('mergedAt') or ''}".strip()
+
+    states = {pr.get("state") for pr in prs or []}
+    closed = prs and not states & {"MERGED", "OPEN"}
+    if closed:
+        return "left", f"PR #{prs[0].get('number')} closed unmerged"
+
+    idle = time.time() - last_activity
+    if idle < IDLE_DAYS * 86400:
+        return "active", ""
+
+    return "left", f"no commit or session for {int(idle // 86400)} days"
+
+
+def tears_down(repo: str) -> bool:
+    """Whether the repository has `make wt-down`. Elsewhere there is no command to offer."""
+    try:
+        makefile = (Path(repo) / "Makefile").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+
+    return bool(TEARDOWN_TARGET.search(makefile))
+
+
+def work_card(repo: str, tree: dict, sessions: list[dict]) -> dict:
+    path = Path(tree["path"])
+    record = read_record(path)
+    feature = str(record.get("id") or path.name)
+    title, stage = feature_of(path, feature)
+    branch = tree["branch"]
+
+    ahead_text = git_output(str(path), "rev-list", "--count", "origin/main..HEAD")
+    status_text = git_output(str(path), "status", "--porcelain") or ""
+    committed_text = (git_output(str(path), "log", "-1", "--format=%ct", "HEAD") or "0").strip()
+    dirty = len([line for line in status_text.splitlines() if line.strip()])
+    counted = bool(ahead_text) and ahead_text.strip().isdigit()
+
+    last_session = max((session["mtime"] for session in sessions), default=0.0)
+    last_activity = max(float(committed_text or 0), last_session)
+    prs = pull_requests(repo, branch) if branch else None
+    status, reason = work_status(prs, last_activity)
+    pr = (prs or [None])[0]
+    offers_teardown = status != "active" and tears_down(repo)
+
+    return {
+        "repo": repo,
+        "repoName": Path(repo).name,
+        "path": str(path),
+        "id": feature,
+        "label": str(record.get("label") or ""),
+        "record": bool(record),
+        "title": title,
+        "stage": stage,
+        "branch": branch,
+        "ahead": int(ahead_text) if counted else None,
+        "dirty": dirty,
+        "clean": dirty == 0,
+        "env": environment_of(record),
+        "sessions": sessions,
+        "status": status,
+        "reason": reason,
+        "command": f"make wt-down ID={feature}" if offers_teardown else "",
+        "pr": pr,
+        "github": prs is not None,
+        "lastActivity": last_activity,
+    }
+
+
+def work_index() -> dict:
+    """Every worktree but the main checkout, of every repository seen in a session cwd."""
+    live = live_sessions()
+    seen: list[tuple[dict, set[str]]] = []
+    repositories: set[str] = set()
+    for path in all_transcripts(None):
+        try:
+            meta = session_meta(path)
+            cwds = session_cwds(path)
+        except OSError:
+            continue
+
+        seen.append((meta, cwds))
+        repositories.update(root for root in map(repository_root, cwds) if root)
+
+    jobs = []
+    for repo in sorted(repositories):
+        trees = list_worktrees(repo)
+        for tree in trees[1:]:
+            missing = tree["bare"] or not Path(tree["path"]).is_dir()
+            if missing:
+                continue
+
+            sessions = [
+                {
+                    "id": meta["id"],
+                    "slug": meta["slug"],
+                    "title": meta["title"],
+                    "mtime": meta["mtime"],
+                    "live": meta["id"] in live,
+                    "state": (live.get(meta["id"]) or {}).get("state", ""),
+                }
+                for meta, cwds in seen
+                if any(inside(cwd, tree["path"]) for cwd in cwds)
+            ]
+            sessions.sort(key=lambda session: session["mtime"], reverse=True)
+            jobs.append((repo, tree, sessions))
+
+    with ThreadPoolExecutor(max_workers=WORK_THREADS) as pool:
+        cards = list(pool.map(lambda job: work_card(*job), jobs))
+
+    cards.sort(key=lambda card: (card["repoName"], -card["lastActivity"]))
+    return {"worktrees": cards, "github": all(card["github"] for card in cards)}
+
+
 # SERVER
 
 
@@ -2026,6 +2324,10 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             self.send_json(build_state(self.scope, session, limit), since)
+            return
+
+        if parsed.path == "/api/work":
+            self.send_ok(work_index())
             return
 
         if parsed.path == "/api/usage/status":

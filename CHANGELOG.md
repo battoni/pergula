@@ -6,6 +6,19 @@ Notable changes to pergula. Newest first.
 
 ### Added
 
+- **`GET /api/work`**, the data behind the coming Work tab: one entry per
+  worktree (the main checkout left out) of every repository a session ran in.
+  Each carries its branch, commits ahead of `origin/main` and the uncommitted
+  count from git; the feature title and stage from `specs/<id>-*/`; the links,
+  ports and database from its `.worktree.json`, and whether Valet serves it (the
+  `api.<label>` link in `~/.config/valet/Sites`); the sessions whose `cwd` is in
+  it, live or not, including one that moved in mid-session; and a status:
+  `active`, `merged` (its PR is merged, waiting for the sweep) or `left` (PR
+  closed unmerged, or seven days with no commit and no session), with the reason
+  and `make wt-down ID=<id>` to copy. GitHub is asked through `gh pr list`, kept
+  five minutes and simply left out when `gh` fails. Read-only: nothing is fetched
+  and nothing is changed.
+
 - **A usage tab**: tokens by project and by day, week, month, year or a range of
   dates, counting each response once — not once per line, and not again in
   the files the CLI copies history into (a continued session, a forked
