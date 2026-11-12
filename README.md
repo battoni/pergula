@@ -188,6 +188,8 @@ its own branch, its own local sites and its own database copy, so no session
 switches branches under another. The **work** tab, the last in the rail, is where
 those worktrees are seen together.
 
+<img src="docs/work.svg" alt="The work tab lists the worktrees of two repositories: one card turns from active to merged, waiting for the sweep, and a click copies its wt-down command, while another left behind says why wt-down would refuse it" width="760">
+
 It lists every worktree of every repository a session ran in, the main checkout
 left out, grouped by repository. On top: how many worktrees, how many have an
 environment up, how many sessions are live in them, and how many were left
