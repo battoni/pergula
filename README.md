@@ -180,6 +180,41 @@ The list is `~/.claude/pergula-favourites.json`, an ordered array of slugs. It
 follows a retitle and forgets a deleted snippet, and a star pointing at a file
 you removed by hand simply stops appearing.
 
+## Work
+
+Running several agents at once works when each has its own checkout. Some
+projects give every piece of work a git worktree under `.claude/worktrees/`, with
+its own branch, its own local sites and its own database copy, so no session
+switches branches under another. The **work** tab, the last in the rail, is where
+those worktrees are seen together.
+
+It lists every worktree of every repository a session ran in, the main checkout
+left out, grouped by repository. On top: how many worktrees, how many have an
+environment up, how many sessions are live in them, and how many were left
+behind. Each card shows:
+
+- the feature: its ID, and its title and stage when the worktree has a `specs/`
+  folder (`intent.md`, `state.md`);
+- the branch, the commits ahead of `origin/main`, and clean or the count of
+  uncommitted files;
+- the environment its `.worktree.json` names — the app and API links, the port,
+  the database — and whether Valet serves it;
+- the sessions that ran in it, live or not;
+- a status, by the same rules the sweep applies: **active**; **merged, waiting
+  for the sweep** (its PR merged); or **left behind**, with the reason — a PR
+  closed unmerged, or no commit and no session for seven days.
+
+A card that is not active also carries `make wt-down ID=<id>` and a **copy**
+button. That is all the tab does with it: tearing a worktree down stays with
+`make wt-down`, which checks the PR, the commits, the files and the sessions
+first and touches nothing when one fails. A card says up front why it would
+refuse (commits not in `origin/main`, uncommitted files). The command is only
+offered where the repository's Makefile has a `wt-down` target.
+
+Filter the cards by typing, switch between **active** and **all**, or narrow to
+one repository from the sidebar. In the sessions list, a session that ran inside
+a worktree carries a `⎇ <worktree>` badge.
+
 ## Keeping the Mac awake
 
 An agent left working stops when the machine sleeps, which is a poor way to find
@@ -263,9 +298,12 @@ caffeinate deadline and the usage summary, all plain files under `~/.claude/`,
 all readable, editable and deletable without this program. To see which
 repository a project folder belongs to it runs `git rev-parse`, which reads.
 
-Nothing leaves the machine — no account, no sync, no telemetry, no network call
-of any kind. Even the Claude mark in the interface is drawn in JavaScript rather
-than fetched, so the page makes no request at all.
+Nothing leaves the machine — no account, no sync, no telemetry. The one network
+call is the **work** tab's: it asks GitHub, through your own `gh`, which pull
+requests a worktree's branch has (`gh pr list --head <branch>`), and keeps the
+answer five minutes. It sends nothing of yours; without `gh` the cards simply
+show no PR. Even the Claude mark in the interface is drawn in JavaScript rather
+than fetched, so the page itself makes no request at all.
 
 The `127.0.0.1` binding is deliberate.
 
