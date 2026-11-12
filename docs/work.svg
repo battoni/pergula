@@ -1,0 +1,166 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 460" width="760" height="460" role="img" aria-labelledby="title desc">
+  <title id="title">The work tab in pergula</title>
+  <desc id="desc">The work tab lists the worktrees of two repositories. One card turns from active to merged, waiting for the sweep, and offers the command that tears it down, which a click copies. Another was left behind, and says why wt-down would refuse it.</desc>
+
+  <!-- Colours are the :root tokens in pergula. The repositories, worktrees, sessions and hosts are made up. -->
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .ripple { transform-box: fill-box; transform-origin: center; opacity: 0; }
+    /* Still frame first: the card merged and the command on offer. */
+    .tab-s, .c0, .c1, .chipA, .dotA, .aheadA, .c1-short, .copied, .cursor { opacity: 0; }
+    @media (prefers-reduced-motion: no-preference) {
+      .tab-s { animation: tab-s 16s step-end infinite; }
+      .tab-w { animation: tab-w 16s step-end infinite; }
+      .pane { animation: pane 16s ease-in-out infinite; }
+      .scroll { animation: scroll 16s ease-in-out infinite; }
+      .c0 { animation: c0 16s step-end infinite; }
+      .c1 { animation: c1 16s step-end infinite; }
+      .c2 { animation: c2 16s step-end infinite; }
+      .in1 { animation: in1 16s ease-out infinite; }
+      .in2 { animation: in2 16s ease-out infinite; }
+      .shift { animation: shift 16s ease-in-out infinite; }
+      .chipA, .dotA, .aheadA, .c1-short { animation: before 16s ease-in-out infinite; }
+      .chipM, .dotM, .aheadM, .c1-tall { animation: after 16s ease-in-out infinite; }
+      .c1-short { animation-name: shortcard; }
+      .td1 { animation: td1 16s ease-out infinite; }
+      .copy { animation: copy 16s step-end infinite; }
+      .copied { animation: copied 16s step-end infinite; }
+      .pulse { animation: pulse 2s ease-in-out infinite; }
+      .r1 { animation: r1 16s ease-out infinite; }
+      .r2 { animation: r2 16s ease-out infinite; }
+      .cursor { animation: cur 16s ease-in-out infinite; }
+    }
+    @keyframes tab-s { 0% { opacity: 1; } 6.25% { opacity: 0; } 100% { opacity: 0; } }
+    @keyframes tab-w { 0% { opacity: 0; } 6.25% { opacity: 1; } 100% { opacity: 1; } }
+    @keyframes pane { 0%, 6.5% { opacity: 0; } 9.5%, 96% { opacity: 1; } 99%, 100% { opacity: 0; } }
+    @keyframes scroll { 0%, 68.75% { transform: translateY(0); } 75%, 99% { transform: translateY(-116px); } 100% { transform: translateY(0); } }
+    @keyframes c0 { 0% { opacity: 1; } 9.4% { opacity: 0; } 100% { opacity: 0; } }
+    @keyframes c1 { 0% { opacity: 0; } 9.4% { opacity: 1; } 13% { opacity: 0; } 100% { opacity: 0; } }
+    @keyframes c2 { 0% { opacity: 0; } 13% { opacity: 1; } 100% { opacity: 1; } }
+    @keyframes in1 { 0%, 8% { opacity: 0; transform: translateY(6px); } 12%, 100% { opacity: 1; transform: translateY(0); } }
+    @keyframes in2 { 0%, 10% { opacity: 0; transform: translateY(6px); } 14%, 100% { opacity: 1; transform: translateY(0); } }
+    @keyframes shift { 0%, 40% { transform: translateY(-37px); } 45%, 100% { transform: translateY(0); } }
+    @keyframes before { 0%, 37.5% { opacity: 1; } 40.5%, 100% { opacity: 0; } }
+    @keyframes after { 0%, 37.5% { opacity: 0; } 40.5%, 100% { opacity: 1; } }
+    @keyframes shortcard { 0%, 41% { opacity: 1; } 42.5%, 100% { opacity: 0; } }
+    @keyframes td1 { 0%, 40.5% { opacity: 0; transform: translateY(-8px); } 45%, 100% { opacity: 1; transform: translateY(0); } }
+    @keyframes copy { 0% { opacity: 1; } 56.25% { opacity: 0; } 67.5% { opacity: 1; } 100% { opacity: 1; } }
+    @keyframes copied { 0% { opacity: 0; } 56.25% { opacity: 1; } 67.5% { opacity: 0; } 100% { opacity: 0; } }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .55; } }
+    @keyframes r1 { 0%, 6% { opacity: 0; transform: scale(.2); } 6.5% { opacity: .55; transform: scale(.4); } 11%, 100% { opacity: 0; transform: scale(1.6); } }
+    @keyframes r2 { 0%, 55.8% { opacity: 0; transform: scale(.2); } 56.3% { opacity: .55; transform: scale(.4); } 61%, 100% { opacity: 0; transform: scale(1.6); } }
+    @keyframes cur { 0%, 2% { opacity: 0; transform: translate(520px, 190px); } 4% { opacity: 1; transform: translate(520px, 190px); } 6% { transform: translate(200px, 94px); } 6.5% { transform: translate(200px, 94px) scale(.9); } 7.2% { opacity: 1; transform: translate(200px, 94px); } 13% { opacity: 1; transform: translate(430px, 250px); } 16%, 48% { opacity: 0; transform: translate(430px, 250px); } 49% { opacity: 0; transform: translate(560px, 330px); } 51% { opacity: 1; transform: translate(560px, 330px); } 55.5% { opacity: 1; transform: translate(672px, 303px); } 56.3% { transform: translate(672px, 303px) scale(.9); } 57.5% { opacity: 1; transform: translate(672px, 303px); } 62%, 100% { opacity: 0; transform: translate(690px, 330px); } }
+  </style>
+
+  <defs>
+    <clipPath id="window"><rect width="760" height="460" rx="12"/></clipPath>
+    <clipPath id="pane"><rect x="241" y="29" width="519" height="431"/></clipPath>
+  </defs>
+
+  <g clip-path="url(#window)">
+    <rect width="760" height="460" fill="#14120f"/>
+    <rect width="760" height="28" fill="#191614"/>
+    <circle cx="16" cy="14" r="5" fill="#ec6a5e"/><circle cx="32" cy="14" r="5" fill="#f4bf4f"/><circle cx="48" cy="14" r="5" fill="#61c554"/>
+    <text x="380" y="18" font-size="11" fill="#6f665e" text-anchor="middle">pergula</text>
+    <line x1="0" y1="28.5" x2="760" y2="28.5" stroke="#322c28"/>
+    <rect x="0" y="29" width="240" height="431" fill="#191614"/>
+    <line x1="240.5" y1="29" x2="240.5" y2="460" stroke="#322c28"/>
+    <g transform="translate(20 46) scale(.05)" fill="#c0e021"><path d="M32 32 L480 32 L480 128 L32 128 Z"/><path d="M32 192 L288 192 L352 288 L32 288 Z"/><path d="M288 352 L480 352 L480 448 L352 448 Z"/></g><text x="50" y="65" font-size="19" fill="#c0e021" font-weight="600">pergula</text>
+    <rect x="14.50" y="80.5" width="49" height="24" rx="7" fill="none" stroke="#322c28"/><text x="39.00" y="96" font-size="10" fill="#9b8f84" text-anchor="middle">sessions</text>
+<rect x="68.83" y="80.5" width="49" height="24" rx="7" fill="none" stroke="#322c28"/><text x="93.33" y="96" font-size="10" fill="#9b8f84" text-anchor="middle">library</text>
+<rect x="123.16" y="80.5" width="49" height="24" rx="7" fill="none" stroke="#322c28"/><text x="147.66" y="96" font-size="10" fill="#9b8f84" text-anchor="middle">usage</text>
+<rect x="177.49" y="80.5" width="49" height="24" rx="7" fill="none" stroke="#322c28"/><text x="201.99" y="96" font-size="10" fill="#9b8f84" text-anchor="middle">work</text>
+<g class="tab-s"><rect x="14.50" y="80.5" width="49" height="24" rx="7" fill="#2a3210" stroke="#c0e021"/><text x="39.00" y="96" font-size="10" fill="#f2ece4" text-anchor="middle">sessions</text></g>
+<g class="tab-w"><rect x="177.49" y="80.5" width="49" height="24" rx="7" fill="#2a3210" stroke="#c0e021"/><text x="201.99" y="96" font-size="10" fill="#f2ece4" text-anchor="middle">work</text></g>
+
+    <g class="pane">
+    <rect x="16.5" y="112.5" width="207" height="30" rx="8" fill="#12100e" stroke="#322c28"/>
+    <text x="28" y="132" font-size="11.5" fill="#6f665e">filter work…</text>
+    <rect x="16.5" y="152.5" width="102" height="24" rx="8" fill="none" stroke="#322c28"/><text x="67.5" y="169" font-size="11.5" fill="#9b8f84" text-anchor="middle">active</text>
+    <rect x="121.5" y="152.5" width="102" height="24" rx="8" fill="#2a3210" stroke="#c0e021"/><text x="172.5" y="169" font-size="11.5" fill="#f2ece4" text-anchor="middle">all</text>
+    <text x="21" y="204" font-size="10" fill="#6f665e" font-weight="600" letter-spacing=".09em">REPOSITORIES</text>
+    <rect x="12.5" y="214.5" width="215" height="27" rx="8" fill="none" stroke="transparent"/><text x="21" y="232" font-size="12.5" fill="#9b8f84">atlas</text><text x="219" y="232" font-size="11" fill="#6f665e" text-anchor="end">1</text>
+    <rect x="12.5" y="243.5" width="215" height="27" rx="8" fill="none" stroke="transparent"/><text x="21" y="261" font-size="12.5" fill="#9b8f84">ledger</text><text x="219" y="261" font-size="11" fill="#6f665e" text-anchor="end">1</text>
+
+    <g clip-path="url(#pane)">
+    <g class="scroll">
+      <g>
+      <rect x="256.5" y="96.5" width="117" height="44" rx="8" fill="#1c1917" stroke="#322c28"/>
+<text x="266" y="112" font-size="9.5" fill="#9b8f84">Worktrees</text>
+<text class="c0" x="266" y="132" font-size="15" fill="#f2ece4" font-weight="700">0</text>
+<text class="c1" x="266" y="132" font-size="15" fill="#f2ece4" font-weight="700">1</text>
+<text class="c2" x="266" y="132" font-size="15" fill="#f2ece4" font-weight="700">2</text>
+      <rect x="380.5" y="96.5" width="117" height="44" rx="8" fill="#1c1917" stroke="#322c28"/>
+<text x="390" y="112" font-size="9.5" fill="#9b8f84">Environments up</text>
+<text class="c0" x="390" y="132" font-size="15" fill="#f2ece4" font-weight="700">0</text>
+<text class="c1" x="390" y="132" font-size="15" fill="#f2ece4" font-weight="700">1</text>
+<text class="c2" x="390" y="132" font-size="15" fill="#f2ece4" font-weight="700">2</text>
+      <rect x="504.5" y="96.5" width="117" height="44" rx="8" fill="#1c1917" stroke="#322c28"/>
+<text x="514" y="112" font-size="9.5" fill="#9b8f84">Live sessions</text>
+<text class="c0" x="514" y="132" font-size="15" fill="#f2ece4" font-weight="700">0</text>
+<text class="c2" x="514" y="132" font-size="15" fill="#f2ece4" font-weight="700">1</text>
+      <rect x="628.5" y="96.5" width="117" height="44" rx="8" fill="#1c1917" stroke="#322c28"/>
+<text x="638" y="112" font-size="9.5" fill="#9b8f84">Left behind</text>
+<text class="c0" x="638" y="132" font-size="15" fill="#f2ece4" font-weight="700">0</text>
+<text class="c2" x="638" y="132" font-size="15" fill="#f2ece4" font-weight="700">1</text>
+      </g>
+      <g class="in1">
+      <text x="256" y="162" font-size="13" fill="#f2ece4" font-weight="700">atlas</text><text x="298" y="162" font-size="11.5" fill="#9b8f84" class="mono">.claude/worktrees</text>
+      <rect class="c1-short" x="256.5" y="172.5" width="488" height="122" rx="10" fill="#1c1917" stroke="#322c28"/>
+<rect class="c1-tall" x="256.5" y="172.5" width="488" height="159" rx="10" fill="#1c1917" stroke="#322c28"/>
+<circle class="dotA" cx="275" cy="194" r="4" fill="#6fa8d6"/><circle class="dotM" cx="275" cy="194" r="4" fill="#85b06b"/>
+<text x="288" y="199" font-size="14" fill="#f2ece4" font-weight="600">atlas-12</text>
+<text x="364" y="198.5" font-size="12.5" fill="#ddd5cb">Paginate the search endpoint</text>
+<g class="chipA"><rect x="678.5" y="184.5" width="52" height="19" rx="9.5" fill="none" stroke="#6fa8d6"/><text x="704.0" y="198" font-size="11" fill="#6fa8d6" text-anchor="middle">active</text></g><g class="chipM"><rect x="582.5" y="184.5" width="148" height="19" rx="9.5" fill="none" stroke="#85b06b"/><text x="656.0" y="198" font-size="11" fill="#85b06b" text-anchor="middle">merged · waiting sweep</text></g>
+<text x="271" y="224" font-size="12.5" fill="#ddd5cb">stage: building</text>
+<text x="376" y="224" font-size="11.5" fill="#9b8f84" class="mono">feature/atlas-12</text>
+<g class="aheadA"><text x="502" y="224" font-size="12.5" fill="#6f665e">3 ahead origin/main</text></g><g class="aheadM"><text x="502" y="224" font-size="12.5" fill="#6f665e">0 ahead origin/main</text></g>
+<text x="638" y="224" font-size="12.5" fill="#6f665e">clean</text>
+<text x="271" y="248" font-size="12.5" fill="#c0e021">app.atlas-12.test</text><text x="382" y="248" font-size="12.5" fill="#c0e021">api.atlas-12.test</text>
+<rect x="494.5" y="234.5" width="42" height="19" rx="9.5" fill="none" stroke="#322c28"/><text x="515.5" y="248" font-size="11" fill="#9b8f84" text-anchor="middle" class="mono">:8112</text>
+<rect x="271.5" y="261.5" width="300" height="22" rx="8" fill="#232020" stroke="#322c28"/>
+<text x="280" y="276" font-size="11.5" fill="#9b8f84" class="mono">7f3a9c1e</text><text x="349" y="276" font-size="12" fill="#ddd5cb">Paginate the search endpoint</text>
+<g class="pulse"><text x="559" y="276" font-size="11" fill="#85b06b" text-anchor="end">● live</text></g>
+<g class="td1">
+<line x1="271" y1="289.5" x2="730" y2="289.5" stroke="#322c28"/>
+<text x="271" y="311.5" font-size="12.5" fill="#6f665e">PR #48 merged 11/11 04:42 PM</text>
+<rect x="459.5" y="295.5" width="190" height="24" rx="7" fill="#12100e" stroke="#322c28"/>
+<text x="469" y="311" font-size="11.5" fill="#f2ece4" class="mono">make wt-down ID=atlas-12</text>
+<g class="copy"><rect x="662.5" y="296.5" width="48" height="22" rx="7" fill="#232020" stroke="#322c28"/><text x="686.5" y="311" font-size="11" fill="#9b8f84" text-anchor="middle">copy</text></g><g class="copied"><rect x="662.5" y="296.5" width="48" height="22" rx="7" fill="#232020" stroke="#c0e021"/><text x="686.5" y="311" font-size="11" fill="#c0e021" text-anchor="middle">copied</text></g>
+</g>
+      </g>
+      <g class="shift"><g class="in2">
+      <text x="256" y="364" font-size="13" fill="#f2ece4" font-weight="700">ledger</text><text x="305" y="364" font-size="11.5" fill="#9b8f84" class="mono">.claude/worktrees</text>
+<rect x="256.5" y="381.5" width="488" height="180" rx="10" fill="#1c1917" stroke="#322c28"/>
+<circle cx="275" cy="403" r="4" fill="#f0a03c"/>
+<text x="288" y="408" font-size="14" fill="#f2ece4" font-weight="600">fix-login</text>
+<text x="358" y="407.5" font-size="12.5" fill="#ddd5cb">Fix the login redirect loop</text>
+<rect x="642.5" y="393.5" width="88" height="19" rx="9.5" fill="none" stroke="#f0a03c"/><text x="686.0" y="407" font-size="11" fill="#f0a03c" text-anchor="middle">left behind</text><rect x="590.5" y="393.5" width="46" height="19" rx="9.5" fill="none" stroke="#e06c62"/><text x="613.0" y="407" font-size="11" fill="#e06c62" text-anchor="middle">dirty</text>
+<text x="271" y="433" font-size="12.5" fill="#ddd5cb">stage: verify</text><text x="356" y="433" font-size="11.5" fill="#9b8f84" class="mono">fix/login-loop</text><text x="464" y="433" font-size="12.5" fill="#6f665e">3 ahead origin/main</text><text x="597" y="433" font-size="12.5" fill="#6f665e">2 uncommitted files</text>
+<text x="271" y="457" font-size="12.5" fill="#c0e021">app.fix-login.test</text><text x="388" y="457" font-size="12.5" fill="#c0e021">api.fix-login.test</text>
+<rect x="505.5" y="443.5" width="42" height="19" rx="9.5" fill="none" stroke="#322c28"/><text x="526.5" y="457" font-size="11" fill="#9b8f84" text-anchor="middle" class="mono">:8131</text>
+<rect x="271.5" y="470.5" width="260" height="22" rx="8" fill="#232020" stroke="#322c28"/>
+<text x="280" y="485" font-size="11.5" fill="#9b8f84" class="mono">b21d0e77</text><text x="349" y="485" font-size="12" fill="#ddd5cb">Fix login redirect</text><text x="522" y="485" font-size="11" fill="#6f665e" text-anchor="end">5d ago</text>
+<line x1="271" y1="498.5" x2="730" y2="498.5" stroke="#322c28"/>
+<text x="271" y="520.5" font-size="12.5" fill="#6f665e">PR #51 closed unmerged</text>
+<rect x="430.5" y="504.5" width="194" height="24" rx="7" fill="#12100e" stroke="#322c28"/>
+<text x="439" y="520" font-size="11.5" fill="#f2ece4" class="mono">make wt-down ID=fix-login</text>
+<rect x="636.5" y="505.5" width="48" height="22" rx="7" fill="#232020" stroke="#322c28"/><text x="660.5" y="520" font-size="11" fill="#9b8f84" text-anchor="middle">copy</text>
+<text x="271" y="546" font-size="11.5" fill="#f0a03c">wt-down refuses while 3 commits are not in origin/main — push or open PR first</text>
+      </g></g>
+    </g>
+    </g>
+
+    <rect x="241" y="29" width="519" height="56" fill="#191614"/>
+    <line x1="241" y1="85.5" x2="760" y2="85.5" stroke="#322c28"/>
+    <text x="262" y="52" font-size="13.5" fill="#f2ece4" font-weight="600">Work</text>
+    <text x="262" y="72" font-size="10.5" fill="#6f665e">2 worktrees  ·  2 environments up  ·  1 left behind</text>
+    </g>
+
+    <circle class="ripple r1" cx="202" cy="94" r="20" fill="#c0e021"/>
+    <circle class="ripple r2" cx="677" cy="307" r="20" fill="#c0e021"/>
+    <g class="cursor"><path d="M0 0 L0 17 L4.5 13 L7.5 20 L10.5 18.8 L7.6 12 L13 12 Z" fill="#f2ece4" stroke="#14120f" stroke-width="1.2" stroke-linejoin="round"/></g>
+  </g>
+  <rect x=".5" y=".5" width="759" height="459" rx="12" fill="none" stroke="#322c28"/>
+</svg>
