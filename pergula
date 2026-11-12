@@ -39,6 +39,7 @@ import time
 import unicodedata
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -1952,6 +1953,306 @@ def usage_sessions(state: dict, span: str, at: str, project: str) -> dict:
     return {**window, "project": project, "name": project_names([project])[project], "sessions": rows}
 
 
+# WORK
+#
+# The Work tab: one card per worktree of every repository a session ran in.
+# Read-only by design. git, the worktree's own record (.worktree.json), its
+# specs/ folder, Valet's site links and the transcripts are read; GitHub is
+# asked through `gh` and the answer kept five minutes. Nothing is fetched and
+# nothing is changed: tearing a worktree down stays with `make wt-down`, which
+# has the checks, so a card only offers that command to copy.
+
+# A Valet site is a link in this folder, named after its host minus the TLD.
+VALET_SITES = Path.home() / ".config" / "valet" / "Sites"
+PR_CACHE_SECONDS = 300
+IDLE_DAYS = 7
+WORK_RECORD = ".worktree.json"
+# Each card costs a few git calls and one gh call; one at a time, a machine with
+# fifty worktrees waited most of a minute for the first answer.
+WORK_THREADS = 8
+TEARDOWN_TARGET = re.compile(r"^wt-down:", re.MULTILINE)
+
+# (repository, branch) -> (asked at, pull requests or None when gh failed)
+_PULL_REQUESTS: dict[tuple[str, str], tuple[float, list | None]] = {}
+_PULL_REQUESTS_LOCK = threading.Lock()
+
+# transcript -> (signature, the working directories it names)
+_CWDS_CACHE: dict[str, tuple[str, set[str]]] = {}
+
+
+def git_output(where: str, *arguments: str) -> str | None:
+    """What git printed, or None when it failed or is not there."""
+    try:
+        probe = subprocess.run(["git", "-C", where, *arguments],
+                               capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+    if probe.returncode != 0:
+        return None
+
+    return probe.stdout
+
+
+def list_worktrees(repo: str) -> list[dict]:
+    """`git worktree list --porcelain` as {path, branch}, the main checkout first."""
+    text = git_output(repo, "worktree", "list", "--porcelain")
+    if text is None:
+        return []
+
+    found: list[dict] = []
+    for line in text.splitlines():
+        if line.startswith("worktree "):
+            found.append({"path": line[len("worktree "):], "branch": "", "bare": False})
+            continue
+
+        if not found:
+            continue
+
+        if line.startswith("branch refs/heads/"):
+            found[-1]["branch"] = line[len("branch refs/heads/"):]
+            continue
+
+        if line == "bare":
+            found[-1]["bare"] = True
+
+    return found
+
+
+def session_cwds(path: Path) -> set[str]:
+    """Every working directory a transcript names in its head and tail. A session
+    that moved into a worktree (EnterWorktree) names it only after the move."""
+    stamp = signature(path)
+    cached = _CWDS_CACHE.get(str(path))
+    fresh = cached is not None and cached[0] == stamp
+    if fresh:
+        return cached[1]
+
+    found: set[str] = set()
+    for chunk in (read_head(path), read_tail(path)):
+        for line in chunk:
+            for match in CWD_FIELD.finditer(line.encode("utf-8")):
+                try:
+                    found.add(json.loads(b'"' + match.group(1) + b'"'))
+                except ValueError:
+                    continue
+
+    _CWDS_CACHE[str(path)] = (stamp, found)
+    return found
+
+
+def inside(cwd: str, folder: str) -> bool:
+    return cwd == folder or cwd.startswith(folder.rstrip("/") + "/")
+
+
+def read_record(tree: Path) -> dict:
+    try:
+        record = json.loads((tree / WORK_RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+    return record if isinstance(record, dict) else {}
+
+
+def feature_of(tree: Path, feature: str) -> tuple[str, str]:
+    """(title, stage) from specs/<id>-*/: the intent's heading and the state's Stage line."""
+    folders = sorted((tree / "specs").glob(f"{feature}-*")) if feature else []
+    if not folders:
+        return "", ""
+
+    return heading_of(folders[0] / "intent.md"), stage_of(folders[0] / "state.md")
+
+
+def heading_of(path: Path) -> str:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+
+    heading = lines[0] if lines else ""
+    return re.sub(r"^#\s*(Intent:\s*)?", "", heading).strip()
+
+
+def stage_of(path: Path) -> str:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+
+    return next((line[len("Stage:"):].strip() for line in lines if line.startswith("Stage:")), "")
+
+
+def environment_of(record: dict) -> dict | None:
+    """The links, ports and database the record names, and whether Valet serves it."""
+    hosts = record.get("hosts") if isinstance(record.get("hosts"), dict) else {}
+    ports = record.get("ports") if isinstance(record.get("ports"), dict) else {}
+    api = hosts.get("api") or ""
+    app = hosts.get("app") or ""
+    if not api:
+        return None
+
+    vite = ports.get("vite")
+    site = VALET_SITES / api.rsplit(".", 1)[0]
+    linked = site.exists() or site.is_symlink()
+    return {
+        "app": f"https://{app}:{vite}" if app and vite else "",
+        "api": f"https://{api}",
+        "port": vite,
+        "e2e": ports.get("e2e"),
+        "database": record.get("database") or "",
+        "up": linked,
+    }
+
+
+def pull_requests(repo: str, branch: str) -> list | None:
+    """The branch's pull requests from `gh`, kept five minutes; None when gh fails."""
+    key = (repo, branch)
+    now = time.time()
+    with _PULL_REQUESTS_LOCK:
+        cached = _PULL_REQUESTS.get(key)
+
+    fresh = cached is not None and now - cached[0] < PR_CACHE_SECONDS
+    if fresh:
+        return cached[1]
+
+    prs = None
+    try:
+        probe = subprocess.run(
+            ["gh", "pr", "list", "--head", branch, "--state", "all", "--json", "number,state,mergedAt"],
+            cwd=repo, capture_output=True, text=True, timeout=15,
+        )
+        answered = probe.returncode == 0
+        prs = json.loads(probe.stdout) if answered else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        prs = None
+
+    prs = prs if isinstance(prs, list) else None
+    with _PULL_REQUESTS_LOCK:
+        _PULL_REQUESTS[key] = (now, prs)
+
+    return prs
+
+
+def work_status(prs: list | None, last_activity: float) -> tuple[str, str]:
+    """(active, merged or left, the reason), the same rules `make wt-gc` applies."""
+    merged = next((pr for pr in prs or [] if pr.get("state") == "MERGED"), None)
+    if merged:
+        return "merged", f"PR #{merged.get('number')} merged {merged.get('mergedAt') or ''}".strip()
+
+    states = {pr.get("state") for pr in prs or []}
+    closed = prs and not states & {"MERGED", "OPEN"}
+    if closed:
+        return "left", f"PR #{prs[0].get('number')} closed unmerged"
+
+    idle = time.time() - last_activity
+    if idle < IDLE_DAYS * 86400:
+        return "active", ""
+
+    return "left", f"no commit or session for {int(idle // 86400)} days"
+
+
+def tears_down(checkout: str) -> bool:
+    """Whether this checkout's Makefile has `wt-down`. Without one there is no command to offer."""
+    try:
+        makefile = (Path(checkout) / "Makefile").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+
+    return bool(TEARDOWN_TARGET.search(makefile))
+
+
+def work_card(repo: str, tree: dict, sessions: list[dict], teardown: bool) -> dict:
+    path = Path(tree["path"])
+    record = read_record(path)
+    feature = str(record.get("id") or path.name)
+    title, stage = feature_of(path, feature)
+    branch = tree["branch"]
+
+    ahead_text = git_output(str(path), "rev-list", "--count", "origin/main..HEAD")
+    status_text = git_output(str(path), "status", "--porcelain") or ""
+    committed_text = (git_output(str(path), "log", "-1", "--format=%ct", "HEAD") or "0").strip()
+    dirty = len([line for line in status_text.splitlines() if line.strip()])
+    counted = bool(ahead_text) and ahead_text.strip().isdigit()
+
+    last_session = max((session["mtime"] for session in sessions), default=0.0)
+    last_activity = max(float(committed_text or 0), last_session)
+    prs = pull_requests(repo, branch) if branch else None
+    status, reason = work_status(prs, last_activity)
+    pr = (prs or [None])[0]
+    offers_teardown = status != "active" and teardown
+
+    return {
+        "repo": repo,
+        "repoName": Path(repo).name,
+        "path": str(path),
+        "id": feature,
+        "label": str(record.get("label") or ""),
+        "record": bool(record),
+        "title": title,
+        "stage": stage,
+        "branch": branch,
+        "ahead": int(ahead_text) if counted else None,
+        "dirty": dirty,
+        "clean": dirty == 0,
+        "env": environment_of(record),
+        "sessions": sessions,
+        "status": status,
+        "reason": reason,
+        "command": f"make wt-down ID={feature}" if offers_teardown else "",
+        "pr": pr,
+        "github": prs is not None,
+        "lastActivity": last_activity,
+    }
+
+
+def work_index() -> dict:
+    """Every worktree but the main checkout, of every repository seen in a session cwd."""
+    live = live_sessions()
+    seen: list[tuple[dict, set[str]]] = []
+    repositories: set[str] = set()
+    for path in all_transcripts(None):
+        try:
+            meta = session_meta(path)
+            cwds = session_cwds(path)
+        except OSError:
+            continue
+
+        seen.append((meta, cwds))
+        repositories.update(root for root in map(repository_root, cwds) if root)
+
+    jobs = []
+    for repo in sorted(repositories):
+        trees = list_worktrees(repo)
+        # Any checkout will do: a branch cut before the tooling, or a main that
+        # has not merged it yet, still has a sibling the command runs from.
+        teardown = any(tears_down(tree["path"]) for tree in trees if not tree["bare"])
+        for tree in trees[1:]:
+            missing = tree["bare"] or not Path(tree["path"]).is_dir()
+            if missing:
+                continue
+
+            sessions = [
+                {
+                    "id": meta["id"],
+                    "slug": meta["slug"],
+                    "title": meta["title"],
+                    "mtime": meta["mtime"],
+                    "live": meta["id"] in live,
+                    "state": (live.get(meta["id"]) or {}).get("state", ""),
+                }
+                for meta, cwds in seen
+                if any(inside(cwd, tree["path"]) for cwd in cwds)
+            ]
+            sessions.sort(key=lambda session: session["mtime"], reverse=True)
+            jobs.append((repo, tree, sessions, teardown))
+
+    with ThreadPoolExecutor(max_workers=WORK_THREADS) as pool:
+        cards = list(pool.map(lambda job: work_card(*job), jobs))
+
+    cards.sort(key=lambda card: (card["repoName"], -card["lastActivity"]))
+    return {"worktrees": cards, "github": all(card["github"] for card in cards)}
+
+
 # SERVER
 
 
@@ -2026,6 +2327,10 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             self.send_json(build_state(self.scope, session, limit), since)
+            return
+
+        if parsed.path == "/api/work":
+            self.send_ok(work_index())
             return
 
         if parsed.path == "/api/usage/status":
@@ -2841,7 +3146,112 @@ PAGE = r"""<!doctype html>
   .rows .gone { display: block; color: var(--subtle); font-size: 11.5px; }
   .back { align-self: flex-start; }
   #usage .empty { padding: 40px 0; }
+
+  /* ---- work ---- */
+  /* The fourth view, read-only: one card per worktree. The rail keeps the
+     filter and trades the tree for the scope and the repositories. */
+  #rail .work-only, #work { display: none; }
+  body.work #rail .sessions-only, body.work #tree, body.work #favourites { display: none; }
+  body.work #rail .work-only { display: block; }
+  body.work #rail .scope.work-only { display: flex; }
+  body.work #scroller, body.work #library, body.work #usage { display: none; }
+  body.work #top .swatch, body.work #copySid, body.work #copyResume { display: none; }
+  #workSide { flex: 1; overflow-y: auto; padding: 4px 12px 24px; }
+  #workSide .head {
+    margin: 14px 0 6px; font-size: 10px; letter-spacing: .09em; text-transform: uppercase;
+    color: var(--subtle); font-weight: 600;
+  }
+  #workSide .repo {
+    display: flex; align-items: center; gap: 8px; width: 100%;
+    padding: 5px 9px; margin: 1px 0; text-align: left;
+    background: none; border: 1px solid transparent; border-radius: 8px;
+    color: var(--muted); font: inherit; font-size: 12.5px; cursor: pointer;
+  }
+  #workSide .repo:hover { background: var(--panel); color: var(--body); }
+  #workSide .repo.on { background: var(--accent-soft); border-color: var(--accent); color: var(--heading); }
+  #workSide .repo .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #workSide .repo .count { flex: none; color: var(--subtle); font-size: 11px; }
+  body.work #work { display: block; flex: 1; min-height: 0; overflow-y: auto; }
+  #work .body {
+    max-width: 1100px; margin: 0 auto; padding: 18px 22px 10vh;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  #work .empty { padding: 40px 0; }
+  .work-group {
+    display: flex; align-items: baseline; gap: 9px; margin-top: 8px;
+    color: var(--heading); font-size: 13px;
+  }
+  .work-group code, .wcard code {
+    font: 11.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted);
+    overflow-wrap: anywhere;
+  }
+  .wcard { padding: 11px 15px; display: flex; flex-direction: column; gap: 6px; cursor: pointer; }
+  .wcard:hover { border-color: var(--subtle); }
+  .wcard:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .wcard .wrow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; min-width: 0; font-size: 12.5px; }
+  .wcard .wrow > * { min-width: 0; }
+  .wcard { --status: var(--state-working); }
+  .wcard.merged { --status: var(--state-ready); }
+  .wcard.left { --status: var(--state-needs-you); }
+  .wcard .dot { background: var(--status); }
+  .wcard .wid { color: var(--heading); font-weight: 600; font-size: 14px; overflow-wrap: anywhere; }
+  .wcard .wtitle { flex: 1 1 12em; color: var(--body); overflow-wrap: anywhere; }
+  .wcard .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
+  .chip {
+    display: inline-block; padding: 1px 8px; border: 1px solid var(--line); border-radius: 999px;
+    font-size: 11px; color: var(--muted); white-space: nowrap;
+  }
+  .chip.status { color: var(--status); border-color: var(--status); }
+  .chip.dirty { color: var(--danger); border-color: var(--danger); }
+  .chip.port { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .wcard .muted { color: var(--subtle); }
+  .wcard a { color: var(--accent); text-decoration: none; overflow-wrap: anywhere; }
+  .wcard a:hover { text-decoration: underline; }
+  .wcard .schip {
+    display: inline-flex; align-items: center; gap: 7px; max-width: 100%;
+    padding: 2px 9px; background: var(--panel-soft); border: 1px solid var(--line); border-radius: 8px;
+    font-size: 12px; color: var(--body);
+  }
+  .wcard .schip .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .wcard .schip .when { flex: none; color: var(--subtle); font-size: 11px; }
+  .wcard .schip .when.live { color: var(--state-ready); }
+  .wcard .schip .when.working { color: var(--state-working); }
+  .wcard .schip .when.needs-you { color: var(--state-needs-you); }
+  .wcard .teardown { padding-top: 6px; border-top: 1px solid var(--line); }
+  .wcard .teardown .cmd {
+    padding: 3px 9px; background: var(--code); border: 1px solid var(--line); border-radius: 7px;
+    color: var(--heading);
+  }
+  .wcard .note { flex-basis: 100%; color: var(--state-needs-you); font-size: 11.5px; }
+  .wcard .more { display: none; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 14px; font-size: 12px; }
+  .wcard.open .more { display: grid; }
+  .wcard .more dt { color: var(--subtle); }
+  .wcard .more dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+  .wt-badge {
+    flex: none; padding: 0 5px;
+    font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted);
+    border: 1px solid var(--line); border-radius: 6px;
+  }
+  .toast {
+    position: fixed; left: 50%; bottom: 26px; z-index: 30; transform: translateX(-50%);
+    max-width: calc(100vw - 28px); padding: 9px 16px;
+    background: var(--panel); color: var(--heading); border: 1px solid var(--state-needs-you); border-radius: 10px;
+    font-size: 12.5px; box-shadow: 0 6px 18px rgba(0,0,0,.45);
+    opacity: 0; pointer-events: none; transition: opacity .15s;
+  }
+  .toast.show { opacity: 1; }
   @media (max-width: 860px) {
+    /* The rail above the pane, and the page scrolls as one: two columns at
+       this width would leave the cards a strip. */
+    body.work { display: block; overflow-y: auto; overflow-x: hidden; }
+    body.work #rail { height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+    body.work .rail-grip { display: none; }
+    body.work #workSide { flex: none; overflow: visible; padding-bottom: 12px; }
+    body.work #pane { height: auto; }
+    body.work #work { overflow: visible; }
+    body.work #top .meta { padding-left: 0; white-space: normal; overflow-wrap: anywhere; }
+    #work .body { padding: 14px; }
+    .wcard .chips { margin-left: 0; flex-basis: 100%; }
     .stats, .stats.three { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .rows .row.project { grid-template-columns: minmax(0, 1.6fr) repeat(3, minmax(0, 1fr)); }
     .rows .row.project .wide, .rows .row.session .wide { display: none; }
@@ -2877,6 +3287,8 @@ PAGE = r"""<!doctype html>
       <button id="tabLibrary" type="button" data-i18n="tabLibrary"></button>
 
       <button id="tabUsage" type="button" data-i18n="tabUsage"></button>
+
+      <button id="tabWork" type="button" data-i18n="tabWork"></button>
     </div>
 
     <div class="scope usage-only" id="usageSpans">
@@ -2900,6 +3312,12 @@ PAGE = r"""<!doctype html>
     <input id="filter" type="search" data-i18n-ph="filterPlaceholder" autocomplete="off">
 
     <button id="focusChip" class="sessions-only" type="button" data-i18n-title="focusOff" hidden></button>
+
+    <div class="scope work-only" id="workScope">
+      <button type="button" data-scope="live" data-i18n-title="workActiveTitle" data-i18n="active"></button>
+
+      <button type="button" data-scope="all" data-i18n="all"></button>
+    </div>
 
     <div class="scope library-only">
       <button id="snipNew" type="button" data-i18n="newSnippet"></button>
@@ -2931,6 +3349,8 @@ PAGE = r"""<!doctype html>
   <nav id="tree"></nav>
 
   <nav id="usageSide" class="usage-only"></nav>
+
+  <nav id="workSide" class="work-only"></nav>
 
   <div class="rail-foot">
     <div class="row">
@@ -3001,6 +3421,8 @@ PAGE = r"""<!doctype html>
 
   <section id="usage"></section>
 
+  <section id="work"></section>
+
   <section id="library">
     <div class="empty" data-i18n="pickSnippet"></div>
 
@@ -3039,6 +3461,8 @@ PAGE = r"""<!doctype html>
 </div>
 
 <button class="jump" id="jump" data-i18n="newMessages"></button>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script>
 const COLORS = {
@@ -3200,6 +3624,29 @@ const STRINGS = {
     noCalls: 'nenhuma chamada neste intervalo', noDataBefore: 'sem dados antes de {date}',
     noUsageYet: 'nada indexado ainda', noMilestones: 'nenhum marco',
     unitBillion: 'bi', unitMillion: 'mi', unitThousand: 'mil',
+    tabWork: 'trabalho',
+    filterWork: 'filtrar trabalho…', filterWorkLabel: 'filtrar trabalho',
+    workActiveTitle: 'com uma sessão aberta num terminal',
+    workTitle: 'Trabalho', workRepos: 'repositórios',
+    workCounts: '{n} worktrees · {e} ambientes no ar · {l} esquecidas',
+    workNoGithub: 'o GitHub não respondeu por {n}: o PR delas não aparece',
+    statWorktrees: 'Worktrees', statEnvUp: 'Ambientes no ar', statLive: 'Sessões ao vivo', statLeft: 'Esquecidas',
+    workActive: 'ativa', workMerged: 'merged · aguarda a limpeza', workLeft: 'esquecida', workDirty: 'alterada',
+    workStage: 'etapa: {s}', workAhead: '{n} à frente de origin/main',
+    workUncommitted: '{n} arquivos sem commit', workClean: 'limpa',
+    workNoEnv: 'sem ambiente — make wt-up para servir',
+    workNoEnvMerged: 'sem ambiente — removida no início da próxima sessão',
+    workEnvDown: 'ambiente fora do ar — make wt-up para servir',
+    workNoSession: 'nenhuma sessão ao vivo', workLive: 'ao vivo', workAgo: 'há {t}',
+    prMerged: 'PR #{n} com merge em {when}', prClosed: 'PR #{n} fechado sem merge',
+    workIdle: 'sem commit nem sessão há {n} dias',
+    workNoteAhead: 'o wt-down recusa enquanto {n} commits não estão em origin/main — faça push ou abra o PR antes',
+    workNoteDirty: 'o wt-down recusa enquanto {n} arquivos estão sem commit — faça commit ou descarte antes',
+    clipboardBlocked: 'Clipboard bloqueado: selecione o comando e copie.',
+    noWorkMatch: 'Nenhuma worktree encontrada.',
+    workLoading: 'lendo cada worktree… a primeira resposta leva alguns segundos',
+    workFailed: 'não foi possível ler as worktrees',
+    moreDb: 'DB', morePath: 'Caminho da worktree', moreEndToEnd: 'porta e2e', moreNone: 'nenhuma (sem ambiente)',
   },
   en: {
     filterPlaceholder: 'filter project or session',
@@ -3278,6 +3725,29 @@ const STRINGS = {
     noCalls: 'no calls in this range', noDataBefore: 'no data before {date}',
     noUsageYet: 'nothing indexed yet', noMilestones: 'no milestones',
     unitBillion: 'bn', unitMillion: 'm', unitThousand: 'k',
+    tabWork: 'work',
+    filterWork: 'filter work…', filterWorkLabel: 'filter work',
+    workActiveTitle: 'with a session open in a terminal',
+    workTitle: 'Work', workRepos: 'repositories',
+    workCounts: '{n} worktrees · {e} environments up · {l} left behind',
+    workNoGithub: 'GitHub did not answer for {n}: their PR is not shown',
+    statWorktrees: 'Worktrees', statEnvUp: 'Environments up', statLive: 'Live sessions', statLeft: 'Left behind',
+    workActive: 'active', workMerged: 'merged · waiting sweep', workLeft: 'left behind', workDirty: 'dirty',
+    workStage: 'stage: {s}', workAhead: '{n} ahead origin/main',
+    workUncommitted: '{n} uncommitted files', workClean: 'clean',
+    workNoEnv: 'no environment — make wt-up to serve it',
+    workNoEnvMerged: 'no environment — torn down next session start',
+    workEnvDown: 'environment down — make wt-up to serve it',
+    workNoSession: 'no live session', workLive: 'live', workAgo: '{t} ago',
+    prMerged: 'PR #{n} merged {when}', prClosed: 'PR #{n} closed unmerged',
+    workIdle: 'no commit or session {n} days',
+    workNoteAhead: 'wt-down refuses while {n} commits are not in origin/main — push or open PR first',
+    workNoteDirty: 'wt-down refuses while {n} files are uncommitted — commit or discard them first',
+    clipboardBlocked: 'Clipboard blocked: select the command and copy it.',
+    noWorkMatch: 'No worktree matches.',
+    workLoading: 'reading every worktree… the first answer takes a few seconds',
+    workFailed: 'could not read the worktrees',
+    moreDb: 'DB', morePath: 'Worktree path', moreEndToEnd: 'e2e port', moreNone: 'none (no environment)',
   },
 };
 
@@ -3989,8 +4459,8 @@ function drawTree() {
     return;
   }
 
-  // The usage view has no tree, so cmd+1..9 has nothing to jump to.
-  if (view === 'usage') {
+  // The usage and work views have no tree, so cmd+1..9 has nothing to jump to.
+  if (view === 'usage' || view === 'work') {
     visibleRows = [];
     return;
   }
@@ -4016,6 +4486,15 @@ function drawTree() {
     const name = document.createElement('b');
     name.textContent = projectName(project);
     summary.appendChild(name);
+
+    // A group under .claude/worktrees/ is one piece of work, not a project.
+    const worktree = (project.path || '').split('/.claude/worktrees/')[1];
+    if (worktree) {
+      const badge = document.createElement('span');
+      badge.className = 'wt-badge';
+      badge.textContent = '⎇ ' + worktree.split('/')[0];
+      summary.appendChild(badge);
+    }
 
     const pencil = document.createElement('button');
     pencil.className = 'pencil';
@@ -4123,6 +4602,7 @@ function setLang(next) {
   drawTree();
   draw();
   if (view === 'usage') drawUsage();
+  if (view === 'work') drawWork();
 }
 
 // KEEPING THE MAC AWAKE
@@ -4271,6 +4751,11 @@ function toggleFocus() {
 function drawTop() {
   if (view === 'usage') {
     drawUsageTop();
+    return;
+  }
+
+  if (view === 'work') {
+    drawWorkTop();
     return;
   }
 
@@ -4675,10 +5160,14 @@ function drawLibraryTree() {
 function paintView() {
   document.body.classList.toggle('library', view === 'library');
   document.body.classList.toggle('usage', view === 'usage');
+  document.body.classList.toggle('work', view === 'work');
   tabSessions.classList.toggle('on', view === 'sessions');
   tabLibrary.classList.toggle('on', view === 'library');
   tabUsage.classList.toggle('on', view === 'usage');
+  tabWork.classList.toggle('on', view === 'work');
   filter.placeholder = t(view === 'library' ? 'filterSnippets' : 'filterPlaceholder');
+  if (view === 'work') filter.placeholder = t('filterWork');
+  filter.setAttribute('aria-label', view === 'work' ? t('filterWorkLabel') : filter.placeholder);
 }
 
 function setView(next) {
@@ -4691,6 +5180,7 @@ function setView(next) {
   drawTop();
   drawTree();
   if (view === 'usage') loadUsage();
+  if (view === 'work') loadWork();
 }
 
 function promote(text) {
@@ -5436,6 +5926,394 @@ window.addEventListener('resize', () => {
   if (charted) drawUsagePane();
 });
 
+// WORK
+
+const workPane = document.getElementById('work');
+const workSide = document.getElementById('workSide');
+const workScopeBox = document.getElementById('workScope');
+const tabWork = document.getElementById('tabWork');
+const toastEl = document.getElementById('toast');
+
+// Read once each time the tab opens, never polled: a cold answer walks every
+// worktree of every repository and takes seconds. Nothing here writes.
+let workData = null;
+let workFailed = false;
+let workRun = 0;
+let workScope = 'all';
+let workRepo = '';
+const workOpen = new Set();
+let toastTimer = null;
+
+function toast(text) {
+  toastEl.textContent = text;
+  toastEl.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toastEl.classList.remove('show'), 3000);
+}
+
+async function loadWork() {
+  const run = ++workRun;
+  workFailed = false;
+  drawWork();
+
+  try {
+    const response = await fetch('/api/work');
+    const data = await response.json();
+    if (run !== workRun) return;
+    workData = data;
+  } catch (error) {
+    if (run !== workRun) return;
+    workFailed = !workData;
+  }
+
+  if (view === 'work') drawWork();
+}
+
+function workCards() {
+  return (workData && workData.worktrees) || [];
+}
+
+function hasLive(card) {
+  return card.sessions.some((item) => item.live);
+}
+
+function workMatches(card, needle) {
+  if (!needle) return true;
+  const fields = [card.id, card.title, card.branch, card.stage, card.repoName, card.path, card.label];
+  return fields.some((field) => (field || '').toLowerCase().includes(needle));
+}
+
+function visibleCards() {
+  const needle = filter.value.trim().toLowerCase();
+  return workCards().filter((card) => (workScope === 'all' || hasLive(card))
+    && (!workRepo || card.repo === workRepo)
+    && workMatches(card, needle));
+}
+
+function workCounts() {
+  const cards = workCards();
+  return {
+    trees: cards.length,
+    up: cards.filter((card) => card.env && card.env.up).length,
+    live: cards.reduce((sum, card) => sum + card.sessions.filter((item) => item.live).length, 0),
+    left: cards.filter((card) => card.status === 'left').length,
+  };
+}
+
+function drawWorkTop() {
+  titleEl.textContent = t('workTitle');
+  titleEl.title = '';
+  if (!workData) {
+    metaEl.textContent = workFailed ? t('workFailed') : t('workLoading');
+    return;
+  }
+
+  const counts = workCounts();
+  const parts = [t('workCounts', { n: counts.trees, e: counts.up, l: counts.left })];
+  const unanswered = workCards().filter((card) => !card.github).length;
+  if (unanswered) parts.push(t('workNoGithub', { n: unanswered }));
+  metaEl.textContent = parts.join('  ·  ');
+}
+
+function paintWorkScope() {
+  for (const button of workScopeBox.querySelectorAll('button')) {
+    button.classList.toggle('on', button.dataset.scope === workScope);
+  }
+}
+
+function drawWorkSide() {
+  paintWorkScope();
+  workSide.replaceChildren();
+  const repos = new Map();
+  for (const card of workCards()) {
+    const entry = repos.get(card.repo) || { name: card.repoName, count: 0 };
+    entry.count += 1;
+    repos.set(card.repo, entry);
+  }
+  if (!repos.size) return;
+
+  workSide.appendChild(head(t('workRepos')));
+  for (const [repo, entry] of repos) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'repo' + (repo === workRepo ? ' on' : '');
+    button.title = shortPath(repo);
+    button.appendChild(textSpan('name', entry.name));
+    button.appendChild(textSpan('count', String(entry.count)));
+    button.addEventListener('click', () => {
+      workRepo = workRepo === repo ? '' : repo;
+      drawWork();
+    });
+    workSide.appendChild(button);
+  }
+}
+
+function textSpan(className, text) {
+  const span = document.createElement('span');
+  span.className = className;
+  span.textContent = text;
+  return span;
+}
+
+function codeSpan(text, className) {
+  const code = document.createElement('code');
+  if (className) code.className = className;
+  code.textContent = text;
+  return code;
+}
+
+function chip(text, className) {
+  return textSpan('chip' + (className ? ' ' + className : ''), text);
+}
+
+function workRow(className) {
+  const row = document.createElement('div');
+  row.className = 'wrow' + (className ? ' ' + className : '');
+  return row;
+}
+
+function shortStamp(iso) {
+  const when = new Date(iso);
+  if (Number.isNaN(when.getTime())) return '';
+  return when.toLocaleDateString(locale(), { day: '2-digit', month: '2-digit' }) + ' '
+    + when.toLocaleTimeString(locale(), { hour: '2-digit', minute: '2-digit' });
+}
+
+function workReason(card) {
+  const pr = card.pr;
+  if (card.status === 'merged' && pr) return t('prMerged', { n: pr.number, when: shortStamp(pr.mergedAt || '') }).trim();
+  if (pr && pr.state === 'CLOSED') return t('prClosed', { n: pr.number });
+  const days = Math.floor(Math.max(0, Date.now() / 1000 - card.lastActivity) / 86400);
+  return t('workIdle', { n: days });
+}
+
+function statusChip(card) {
+  if (card.status === 'merged') return chip(t('workMerged'), 'status');
+  if (card.status === 'left') return chip(t('workLeft'), 'status');
+  return chip(t('workActive'), 'status');
+}
+
+function link(url) {
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.target = '_blank';
+  anchor.rel = 'noreferrer';
+  anchor.textContent = url.replace(/^https:\/\//, '');
+  anchor.addEventListener('click', (event) => event.stopPropagation());
+  return anchor;
+}
+
+function environmentRow(card) {
+  const row = workRow();
+  const env = card.env;
+  if (env && env.up) {
+    if (env.app) row.appendChild(link(env.app));
+    row.appendChild(link(env.api));
+    if (env.port) row.appendChild(chip(':' + env.port, 'port'));
+    return row;
+  }
+
+  const merged = card.status === 'merged';
+  const text = env ? t('workEnvDown') : t(merged ? 'workNoEnvMerged' : 'workNoEnv');
+  row.appendChild(textSpan('muted', text));
+  return row;
+}
+
+function sessionChip(item) {
+  const box = textSpan('schip', '');
+  box.title = item.id;
+  box.appendChild(codeSpan(item.id.slice(0, 8)));
+  box.appendChild(textSpan('name', item.title || ''));
+  const when = item.live
+    ? textSpan('when live' + (item.state ? ' ' + item.state : ''), '● ' + t('workLive'))
+    : textSpan('when', t('workAgo', { t: ago(item.mtime) }));
+  box.appendChild(when);
+  return box;
+}
+
+function sessionsRow(card) {
+  const row = workRow();
+  if (!card.sessions.length) {
+    row.appendChild(textSpan('muted', t('workNoSession')));
+    return row;
+  }
+
+  for (const item of card.sessions) row.appendChild(sessionChip(item));
+  return row;
+}
+
+function copyCommand(card, button) {
+  const failed = () => toast(t('clipboardBlocked'));
+  if (!navigator.clipboard) {
+    failed();
+    return;
+  }
+
+  navigator.clipboard.writeText(card.command).then(() => {
+    button.textContent = t('copied');
+    button.classList.add('done');
+    setTimeout(() => { button.textContent = t('copy'); button.classList.remove('done'); }, 1800);
+  }).catch(failed);
+}
+
+function teardownRow(card) {
+  const row = workRow('teardown');
+  row.appendChild(textSpan('muted', workReason(card)));
+  if (!card.command) return row;
+
+  row.appendChild(codeSpan(card.command, 'cmd'));
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'copy';
+  button.textContent = t('copy');
+  button.addEventListener('click', (event) => {
+    event.stopPropagation();
+    copyCommand(card, button);
+  });
+  row.appendChild(button);
+
+  if (card.ahead) row.appendChild(textSpan('note', t('workNoteAhead', { n: card.ahead })));
+  if (!card.ahead && card.dirty) row.appendChild(textSpan('note', t('workNoteDirty', { n: card.dirty })));
+  return row;
+}
+
+function moreList(card) {
+  const list = document.createElement('dl');
+  list.className = 'more';
+  const env = card.env;
+  const pairs = [
+    [t('moreDb'), (env && env.database) || t('moreNone')],
+    [t('morePath'), shortPath(card.path)],
+    [t('moreEndToEnd'), (env && env.e2e) ? String(env.e2e) : t('moreNone')],
+  ];
+  for (const [term, value] of pairs) {
+    const dt = document.createElement('dt');
+    dt.textContent = term;
+    const dd = document.createElement('dd');
+    dd.textContent = value;
+    list.append(dt, dd);
+  }
+  return list;
+}
+
+function workCard(card) {
+  const box = document.createElement('article');
+  box.className = 'card wcard ' + card.status + (workOpen.has(card.path) ? ' open' : '');
+  box.tabIndex = 0;
+  box.title = shortPath(card.path);
+
+  const first = workRow();
+  const dot = textSpan('dot', '');
+  first.appendChild(dot);
+  first.appendChild(textSpan('wid', card.id));
+  first.appendChild(textSpan('wtitle', card.title || ''));
+  const chips = textSpan('chips', '');
+  if (card.dirty) chips.appendChild(chip(t('workDirty'), 'dirty'));
+  chips.appendChild(statusChip(card));
+  first.appendChild(chips);
+  box.appendChild(first);
+
+  const second = workRow();
+  if (card.stage) second.appendChild(textSpan('', t('workStage', { s: card.stage })));
+  second.appendChild(codeSpan(card.branch || '—'));
+  if (card.ahead !== null) second.appendChild(textSpan('muted', t('workAhead', { n: card.ahead })));
+  second.appendChild(textSpan('muted', card.dirty ? t('workUncommitted', { n: card.dirty }) : t('workClean')));
+  box.appendChild(second);
+
+  box.appendChild(environmentRow(card));
+  box.appendChild(sessionsRow(card));
+  if (card.status !== 'active') box.appendChild(teardownRow(card));
+  box.appendChild(moreList(card));
+
+  const toggle = () => {
+    if (workOpen.has(card.path)) workOpen.delete(card.path);
+    if (!box.classList.contains('open')) workOpen.add(card.path);
+    box.classList.toggle('open');
+  };
+  box.addEventListener('click', () => {
+    const selecting = String(window.getSelection() || '').length > 0;
+    if (selecting) return;
+    toggle();
+  });
+  box.addEventListener('keydown', (event) => {
+    if (event.target !== box) return;
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    toggle();
+  });
+  return box;
+}
+
+function workStat(label, value) {
+  const box = document.createElement('div');
+  box.className = 'stat';
+  box.appendChild(textSpan('label', label));
+  const figure = document.createElement('b');
+  figure.textContent = String(value);
+  box.appendChild(figure);
+  return box;
+}
+
+function drawWorkPane() {
+  const body = document.createElement('div');
+  body.className = 'body';
+  workPane.replaceChildren(body);
+
+  if (!workData) {
+    const waiting = document.createElement('div');
+    waiting.className = 'empty';
+    waiting.textContent = workFailed ? t('workFailed') : t('workLoading');
+    body.appendChild(waiting);
+    return;
+  }
+
+  const counts = workCounts();
+  const stats = document.createElement('div');
+  stats.className = 'stats';
+  stats.append(workStat(t('statWorktrees'), counts.trees), workStat(t('statEnvUp'), counts.up),
+               workStat(t('statLive'), counts.live), workStat(t('statLeft'), counts.left));
+  body.appendChild(stats);
+
+  const cards = visibleCards();
+  if (!cards.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = t('noWorkMatch');
+    body.appendChild(empty);
+    return;
+  }
+
+  let repo = null;
+  for (const card of cards) {
+    if (card.repo !== repo) {
+      repo = card.repo;
+      const group = document.createElement('div');
+      group.className = 'work-group';
+      group.title = shortPath(repo);
+      const name = document.createElement('b');
+      name.textContent = card.repoName;
+      group.append(name, codeSpan('.claude/worktrees'));
+      body.appendChild(group);
+    }
+    body.appendChild(workCard(card));
+  }
+}
+
+function drawWork() {
+  drawWorkTop();
+  drawWorkSide();
+  drawWorkPane();
+}
+
+for (const button of workScopeBox.querySelectorAll('button')) {
+  button.addEventListener('click', () => {
+    workScope = button.dataset.scope;
+    drawWork();
+  });
+}
+
+tabWork.addEventListener('click', () => setView('work'));
+
 // PALETTE
 
 function paletteHits() {
@@ -5608,13 +6486,20 @@ jump.addEventListener('click', () => {
   jump.classList.remove('show');
 });
 
-filter.addEventListener('input', drawTree);
+// The work view filters its cards, not the tree, and redraws only on a key:
+// the index poll would otherwise rebuild every card under the pointer.
+function filtered() {
+  if (view === 'work') drawWork();
+  drawTree();
+}
+
+filter.addEventListener('input', filtered);
 
 filter.addEventListener('keydown', (event) => {
   if (event.key !== 'Escape') return;
   filter.value = '';
   filter.blur();
-  drawTree();
+  filtered();
 });
 
 awake.addEventListener('click', toggleAwake);

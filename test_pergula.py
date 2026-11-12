@@ -1511,5 +1511,347 @@ class Caffeine(unittest.TestCase):
         self.assertEqual(pergula.CAFFEINE_PATH.read_text(), "{{{")
 
 
+class WorkIndex(unittest.TestCase):
+    """The Work tab's data: every worktree of every repository a session ran in.
+    git, the record and the transcripts are real; gh is a stub on PATH."""
+
+    FAKE_GH = """#!/bin/sh
+echo "$@" >> "{log}"
+[ -f "{fail}" ] && exit 1
+branch=""
+while [ $# -gt 0 ]; do
+  [ "$1" = "--head" ] && branch="$2"
+  shift
+done
+case "$branch" in
+  fix/done-2) echo '[{{"number":12,"state":"MERGED","mergedAt":"2026-11-11T09:40:00Z"}}]' ;;
+  feature/gone-3) echo '[{{"number":13,"state":"CLOSED","mergedAt":null}}]' ;;
+  feature/feat-1) echo '[{{"number":11,"state":"OPEN","mergedAt":null}}]' ;;
+  *) echo '[]' ;;
+esac
+"""
+
+    @classmethod
+    def setUpClass(cls):
+        # One repository for the class: four worktrees take a second or two to
+        # make, and no test changes git.
+        cls.dir = Path(tempfile.mkdtemp()).resolve()
+        cls.build_repository()
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp()).resolve()
+        pergula._META_CACHE.clear()
+        pergula._ROOTS.clear()
+        pergula._PULL_REQUESTS.clear()
+        pergula._CWDS_CACHE.clear()
+
+        for name, value in (("PROJECTS", self.dir / "projects"),
+                            ("LIVE_PATH", self.dir / "live"),
+                            ("AGENT_STATE_PATH", self.dir / "agents"),
+                            ("VALET_SITES", self.dir / "valet")):
+            patcher = unittest.mock.patch.object(pergula, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+            value.mkdir()
+
+        bin_dir = self.dir / "bin"
+        bin_dir.mkdir()
+        self.gh_log = self.dir / "gh.log"
+        self.gh_fail = self.dir / "gh.fail"
+        gh = bin_dir / "gh"
+        gh.write_text(self.FAKE_GH.format(log=self.gh_log, fail=self.gh_fail))
+        gh.chmod(0o755)
+        path = unittest.mock.patch.dict(os.environ, {"PATH": f"{bin_dir}:{os.environ['PATH']}"})
+        path.start()
+        self.addCleanup(path.stop)
+
+        self.session("s1", self.feat)
+        self.session("s2", self.done)
+        # Started in the main checkout, then moved into gone-3 (EnterWorktree).
+        self.session("s3", self.repo, later=self.gone)
+        (pergula.LIVE_PATH / "1.json").write_text(json.dumps({"pid": os.getpid(), "sessionId": "s1"}))
+        (pergula.VALET_SITES / "api.f1.proj").write_text("")
+
+    @staticmethod
+    def git(*arguments, where, stamp=None):
+        import subprocess
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        if stamp:
+            env.update(GIT_AUTHOR_DATE=stamp, GIT_COMMITTER_DATE=stamp)
+        subprocess.run(["git", "-C", str(where), *arguments], check=True, capture_output=True, env=env)
+
+    @classmethod
+    def worktree(cls, folder, branch):
+        tree = cls.repo / ".claude" / "worktrees" / folder
+        cls.git("worktree", "add", "-q", "-b", branch, str(tree), "origin/main", where=cls.repo)
+        return tree
+
+    @classmethod
+    def build_repository(self):
+        origin = self.dir / "origin.git"
+        self.git("init", "-q", "--bare", "-b", "main", str(origin), where=self.dir)
+        self.repo = self.dir / "proj"
+        self.repo.mkdir()
+        self.git("init", "-q", "-b", "main", where=self.repo)
+        (self.repo / ".gitignore").write_text(".worktree.json\n.claude/worktrees/\n")
+        (self.repo / "Makefile").write_text("wt-down: ## tear a worktree down\n\t@true\n")
+        self.git("add", ".", where=self.repo)
+        self.git("commit", "-q", "-m", "first", where=self.repo)
+        self.git("remote", "add", "origin", str(origin), where=self.repo)
+        self.git("push", "-q", "origin", "main", where=self.repo)
+        self.git("fetch", "-q", "origin", where=self.repo)
+
+        self.feat = self.worktree("feat-1", "feature/feat-1")
+        specs = self.feat / "specs" / "feat-1-thing"
+        specs.mkdir(parents=True)
+        (specs / "intent.md").write_text("# Intent: Feature one\n\nWhy.\n")
+        (specs / "state.md").write_text("# State: feat-1\nStage: build F2/4\nUpdated: x\n")
+        self.git("add", ".", where=self.feat)
+        self.git("commit", "-q", "-m", "work", where=self.feat)
+        (self.feat / "loose.txt").write_text("not committed\n")
+        (self.feat / ".worktree.json").write_text(json.dumps({
+            "id": "feat-1", "label": "f1", "branch": "feature/feat-1",
+            "hosts": {"api": "api.f1.proj.test", "app": "app.f1.proj.test"},
+            "ports": {"base": 6000, "slot": 1, "vite": 6001, "e2e": 6101},
+            "database": "proj_f1",
+        }))
+
+        self.done = self.worktree("done-2", "fix/done-2")
+        self.gone = self.worktree("gone-3", "feature/gone-3")
+        self.old = self.worktree("old-4", "feature/old-4")
+        self.git("commit", "-q", "--allow-empty", "-m", "old", where=self.old,
+                 stamp="2026-01-01T00:00:00")
+
+    def session(self, name, cwd, later=None):
+        folder = pergula.PROJECTS / pergula.project_slug(cwd)
+        folder.mkdir(exist_ok=True)
+        lines = record(f"hello from {name}", cwd=str(cwd))
+        if later:
+            # Past the head pergula reads, so only the tail can know the move.
+            lines += record("x" * (pergula.HEAD_BYTES + 1024), role="assistant")
+            lines += record("moved", cwd=str(later))
+        (folder / f"{name}.jsonl").write_text(lines)
+
+    def cards(self):
+        return {card["id"]: card for card in pergula.work_index()["worktrees"]}
+
+    def test_lists_every_worktree_but_the_main_checkout(self):
+        self.assertEqual(set(self.cards()), {"feat-1", "done-2", "gone-3", "old-4"})
+
+    def test_an_active_worktree_carries_git_specs_record_and_sessions(self):
+        card = self.cards()["feat-1"]
+
+        self.assertEqual(card["repo"], str(self.repo))
+        self.assertEqual(card["path"], str(self.feat))
+        self.assertEqual(card["branch"], "feature/feat-1")
+        self.assertEqual(card["ahead"], 1)
+        self.assertEqual(card["dirty"], 1)
+        self.assertFalse(card["clean"])
+        self.assertEqual(card["title"], "Feature one")
+        self.assertEqual(card["stage"], "build F2/4")
+        self.assertEqual(card["label"], "f1")
+        self.assertEqual(card["env"], {"app": "https://app.f1.proj.test:6001", "api": "https://api.f1.proj.test",
+                                       "port": 6001, "e2e": 6101, "database": "proj_f1", "up": True})
+        self.assertEqual([(s["id"], s["live"]) for s in card["sessions"]], [("s1", True)])
+        self.assertEqual(card["status"], "active")
+        self.assertEqual(card["pr"]["number"], 11)
+        self.assertEqual(card["command"], "")
+
+    def test_an_environment_is_down_without_its_valet_link(self):
+        (pergula.VALET_SITES / "api.f1.proj").unlink()
+
+        self.assertFalse(self.cards()["feat-1"]["env"]["up"])
+
+    def test_a_worktree_without_a_record_has_no_environment(self):
+        card = self.cards()["done-2"]
+
+        self.assertIsNone(card["env"])
+        self.assertEqual(card["label"], "")
+
+    def test_a_merged_worktree_waits_for_the_sweep(self):
+        card = self.cards()["done-2"]
+
+        self.assertEqual(card["status"], "merged")
+        self.assertEqual(card["ahead"], 0)
+        self.assertTrue(card["clean"])
+        self.assertIn("#12", card["reason"])
+        self.assertEqual(card["command"], "make wt-down ID=done-2")
+        self.assertEqual([s["id"] for s in card["sessions"]], ["s2"])
+        self.assertFalse(card["sessions"][0]["live"])
+
+    def test_a_closed_unmerged_pr_is_left_behind_with_its_reason(self):
+        card = self.cards()["gone-3"]
+
+        self.assertEqual(card["status"], "left")
+        self.assertEqual(card["reason"], "PR #13 closed unmerged")
+        self.assertEqual(card["command"], "make wt-down ID=gone-3")
+
+    def strip_teardown(self, *checkouts):
+        for checkout in checkouts:
+            makefile = checkout / "Makefile"
+            saved = makefile.read_text()
+            self.addCleanup(makefile.write_text, saved)
+            makefile.write_text("test:\n\t@true\n")
+
+    def test_no_command_where_the_repository_has_no_wt_down(self):
+        self.strip_teardown(self.repo, self.feat, self.done, self.gone, self.old)
+
+        card = self.cards()["gone-3"]
+
+        self.assertEqual(card["status"], "left")
+        self.assertEqual(card["command"], "")
+
+    def test_the_command_is_offered_when_any_checkout_has_wt_down(self):
+        """A branch made before the tooling (pr50) and a main that has not
+        merged it yet still get the command: it runs from the checkout that has it."""
+        self.strip_teardown(self.repo, self.done, self.gone, self.old)
+
+        cards = self.cards()
+
+        self.assertEqual(cards["gone-3"]["command"], "make wt-down ID=gone-3")
+        self.assertEqual(cards["done-2"]["command"], "make wt-down ID=done-2")
+
+    def test_a_session_counts_where_its_cwd_moved(self):
+        self.assertEqual([s["id"] for s in self.cards()["gone-3"]["sessions"]], ["s3"])
+
+    def test_seven_idle_days_are_left_behind(self):
+        card = self.cards()["old-4"]
+
+        self.assertEqual(card["status"], "left")
+        self.assertRegex(card["reason"], r"^no commit or session for \d+ days$")
+        self.assertEqual(card["command"], "make wt-down ID=old-4")
+
+    def test_a_recent_session_keeps_an_old_commit_active(self):
+        self.session("s4", self.old)
+
+        self.assertEqual(self.cards()["old-4"]["status"], "active")
+
+    def test_gh_failing_leaves_the_pr_out_and_nothing_merged(self):
+        self.gh_fail.write_text("")
+
+        cards = self.cards()
+
+        self.assertIsNone(cards["done-2"]["pr"])
+        self.assertEqual(cards["done-2"]["status"], "active")
+        self.assertEqual(cards["old-4"]["status"], "left")
+        self.assertFalse(pergula.work_index()["github"])
+
+    def test_gh_is_asked_once_per_branch_in_five_minutes(self):
+        self.cards()
+        self.cards()
+
+        calls = self.gh_log.read_text().splitlines()
+        self.assertEqual(len(calls), 4)
+        self.assertIn("pr list --head fix/done-2 --state all --json number,state,mergedAt", calls)
+
+    def test_a_stale_answer_is_asked_again(self):
+        self.cards()
+        for key, (stamp, prs) in list(pergula._PULL_REQUESTS.items()):
+            pergula._PULL_REQUESTS[key] = (stamp - pergula.PR_CACHE_SECONDS - 1, prs)
+
+        self.cards()
+
+        self.assertEqual(len(self.gh_log.read_text().splitlines()), 8)
+
+    def test_nothing_is_fetched(self):
+        with unittest.mock.patch.object(pergula.subprocess, "run", wraps=pergula.subprocess.run) as run:
+            self.cards()
+
+        argvs = [" ".join(map(str, call.args[0])) for call in run.call_args_list]
+        self.assertFalse([argv for argv in argvs if " fetch" in argv or " pull" in argv])
+
+    def test_a_cwd_outside_git_is_skipped(self):
+        loose = self.dir / "loose"
+        loose.mkdir()
+        self.session("s5", loose)
+
+        self.assertEqual(len(self.cards()), 4)
+
+    def test_the_route_serves_it(self):
+        import urllib.request
+        server = pergula.ThreadingHTTPServer(("127.0.0.1", 0), pergula.Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+
+        with urllib.request.urlopen(f"http://127.0.0.1:{server.server_port}/api/work", timeout=10) as response:
+            payload = json.loads(response.read())
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual({card["id"] for card in payload["worktrees"]}, {"feat-1", "done-2", "gone-3", "old-4"})
+
+
+class WorkTab(unittest.TestCase):
+    """The page side of the Work tab: read-only, loaded once on open, in pergula's own look."""
+
+    def setUp(self):
+        self.page = pergula.PAGE
+        start = self.page.index("// WORK\n")
+        self.script = self.page[start:self.page.index("// PALETTE", start)]
+        block = self.page[self.page.index("const STRINGS = {"):]
+        self.en = block[block.index("en: {"):block.index("\n};")]
+
+    def test_work_is_the_last_tab(self):
+        tabs = self.page[self.page.index('<div class="tabs">'):]
+        tabs = tabs[:tabs.index("</div>")]
+
+        self.assertEqual(re.findall(r'id="(tab\w+)"', tabs), ["tabSessions", "tabLibrary", "tabUsage", "tabWork"])
+
+    def test_the_pane_and_the_rail_have_their_own_blocks(self):
+        self.assertIn('<section id="work"', self.page)
+        self.assertIn('id="workSide"', self.page)
+        self.assertIn('id="workScope"', self.page)
+
+    def test_the_strings_the_proposal_names(self):
+        for text in ("'filter work…'", "'filter work'", "'No worktree matches.'",
+                     "'merged · waiting sweep'", "'left behind'", "'no environment — make wt-up to serve it'",
+                     "'no environment — torn down next session start'",
+                     "'Clipboard blocked: select the command and copy it.'", "'no live session'",
+                     "'Worktrees'", "'Environments up'", "'Live sessions'", "'Left behind'"):
+            self.assertIn(text, self.en)
+
+    def test_it_reads_api_work_and_never_polls(self):
+        self.assertIn("fetch('/api/work')", self.script)
+        self.assertNotIn("setInterval", self.script)
+        self.assertNotRegex(self.script, r"setTimeout\(\s*loadWork")
+
+    def test_no_control_writes(self):
+        self.assertNotIn("method:", self.script)
+        self.assertNotRegex(self.script, r"fetch\('/api/(?!work')")
+
+    def test_the_copy_button_holds_the_command_the_server_gave(self):
+        self.assertIn("navigator.clipboard.writeText(card.command)", self.script)
+        self.assertIn("1800", self.script)
+        self.assertIn("3000", self.script)
+
+    def test_session_groups_in_a_worktree_get_a_badge(self):
+        self.assertIn("/.claude/worktrees/", self.page)
+        self.assertIn("⎇", self.page)
+        self.assertIn(".wt-badge", self.page)
+
+    def test_narrow_screens_wrap_rather_than_scroll(self):
+        narrow = self.page[self.page.index("@media (max-width: 860px)"):]
+        narrow = narrow[:narrow.index("</style>")]
+
+        self.assertIn("body.work", narrow)
+        self.assertIn("overflow-wrap: anywhere", self.page)
+
+    def test_there_is_no_write_route_for_work(self):
+        import urllib.error
+        import urllib.request
+        server = pergula.ThreadingHTTPServer(("127.0.0.1", 0), pergula.Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+
+        request = urllib.request.Request(f"http://127.0.0.1:{server.server_port}/api/work",
+                                         data=b"{}", method="POST")
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(request, timeout=10)
+
+        self.assertEqual(caught.exception.code, 404)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
