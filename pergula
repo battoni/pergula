@@ -1971,6 +1971,8 @@ WORK_RECORD = ".worktree.json"
 # fifty worktrees waited most of a minute for the first answer.
 WORK_THREADS = 8
 TEARDOWN_TARGET = re.compile(r"^wt-down:", re.MULTILINE)
+# The IDs `worktree.py` accepts (its ID_RE): anything else is not pasted into a shell.
+TEARDOWN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 # (repository, branch) -> (asked at, pull requests or None when gh failed)
 _PULL_REQUESTS: dict[tuple[str, str], tuple[float, list | None]] = {}
@@ -2198,7 +2200,7 @@ def work_card(repo: str, tree: dict, sessions: list[dict], teardown: bool) -> di
         "sessions": sessions,
         "status": status,
         "reason": reason,
-        "command": f"make wt-down ID={feature}" if offers_teardown else "",
+        "command": f"make wt-down ID={feature}" if offers_teardown and TEARDOWN_ID.fullmatch(feature) else "",
         "pr": pr,
         "github": prs is not None,
         "lastActivity": last_activity,
