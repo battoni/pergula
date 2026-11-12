@@ -1687,16 +1687,30 @@ esac
         self.assertEqual(card["reason"], "PR #13 closed unmerged")
         self.assertEqual(card["command"], "make wt-down ID=gone-3")
 
+    def strip_teardown(self, *checkouts):
+        for checkout in checkouts:
+            makefile = checkout / "Makefile"
+            saved = makefile.read_text()
+            self.addCleanup(makefile.write_text, saved)
+            makefile.write_text("test:\n\t@true\n")
+
     def test_no_command_where_the_repository_has_no_wt_down(self):
-        makefile = self.repo / "Makefile"
-        saved = makefile.read_text()
-        self.addCleanup(makefile.write_text, saved)
-        makefile.write_text("test:\n\t@true\n")
+        self.strip_teardown(self.repo, self.feat, self.done, self.gone, self.old)
 
         card = self.cards()["gone-3"]
 
         self.assertEqual(card["status"], "left")
         self.assertEqual(card["command"], "")
+
+    def test_the_command_is_offered_when_any_checkout_has_wt_down(self):
+        """A branch made before the tooling (pr50) and a main that has not
+        merged it yet still get the command: it runs from the checkout that has it."""
+        self.strip_teardown(self.repo, self.done, self.gone, self.old)
+
+        cards = self.cards()
+
+        self.assertEqual(cards["gone-3"]["command"], "make wt-down ID=gone-3")
+        self.assertEqual(cards["done-2"]["command"], "make wt-down ID=done-2")
 
     def test_a_session_counts_where_its_cwd_moved(self):
         self.assertEqual([s["id"] for s in self.cards()["gone-3"]["sessions"]], ["s3"])
@@ -1766,6 +1780,77 @@ esac
 
         self.assertEqual(response.status, 200)
         self.assertEqual({card["id"] for card in payload["worktrees"]}, {"feat-1", "done-2", "gone-3", "old-4"})
+
+
+class WorkTab(unittest.TestCase):
+    """The page side of the Work tab: read-only, loaded once on open, in pergula's own look."""
+
+    def setUp(self):
+        self.page = pergula.PAGE
+        start = self.page.index("// WORK\n")
+        self.script = self.page[start:self.page.index("// PALETTE", start)]
+        block = self.page[self.page.index("const STRINGS = {"):]
+        self.en = block[block.index("en: {"):block.index("\n};")]
+
+    def test_work_is_the_last_tab(self):
+        tabs = self.page[self.page.index('<div class="tabs">'):]
+        tabs = tabs[:tabs.index("</div>")]
+
+        self.assertEqual(re.findall(r'id="(tab\w+)"', tabs), ["tabSessions", "tabLibrary", "tabUsage", "tabWork"])
+
+    def test_the_pane_and_the_rail_have_their_own_blocks(self):
+        self.assertIn('<section id="work"', self.page)
+        self.assertIn('id="workSide"', self.page)
+        self.assertIn('id="workScope"', self.page)
+
+    def test_the_strings_the_proposal_names(self):
+        for text in ("'filter work…'", "'filter work'", "'No worktree matches.'",
+                     "'merged · waiting sweep'", "'left behind'", "'no environment — make wt-up to serve it'",
+                     "'no environment — torn down next session start'",
+                     "'Clipboard blocked: select the command and copy it.'", "'no live session'",
+                     "'Worktrees'", "'Environments up'", "'Live sessions'", "'Left behind'"):
+            self.assertIn(text, self.en)
+
+    def test_it_reads_api_work_and_never_polls(self):
+        self.assertIn("fetch('/api/work')", self.script)
+        self.assertNotIn("setInterval", self.script)
+        self.assertNotRegex(self.script, r"setTimeout\(\s*loadWork")
+
+    def test_no_control_writes(self):
+        self.assertNotIn("method:", self.script)
+        self.assertNotRegex(self.script, r"fetch\('/api/(?!work')")
+
+    def test_the_copy_button_holds_the_command_the_server_gave(self):
+        self.assertIn("navigator.clipboard.writeText(card.command)", self.script)
+        self.assertIn("1800", self.script)
+        self.assertIn("3000", self.script)
+
+    def test_session_groups_in_a_worktree_get_a_badge(self):
+        self.assertIn("/.claude/worktrees/", self.page)
+        self.assertIn("⎇", self.page)
+        self.assertIn(".wt-badge", self.page)
+
+    def test_narrow_screens_wrap_rather_than_scroll(self):
+        narrow = self.page[self.page.index("@media (max-width: 860px)"):]
+        narrow = narrow[:narrow.index("</style>")]
+
+        self.assertIn("body.work", narrow)
+        self.assertIn("overflow-wrap: anywhere", self.page)
+
+    def test_there_is_no_write_route_for_work(self):
+        import urllib.error
+        import urllib.request
+        server = pergula.ThreadingHTTPServer(("127.0.0.1", 0), pergula.Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+
+        request = urllib.request.Request(f"http://127.0.0.1:{server.server_port}/api/work",
+                                         data=b"{}", method="POST")
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(request, timeout=10)
+
+        self.assertEqual(caught.exception.code, 404)
 
 
 if __name__ == "__main__":

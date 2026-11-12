@@ -6,6 +6,20 @@ Notable changes to pergula. Newest first.
 
 ### Added
 
+- **A Work tab**, the last in the rail: one card per worktree, grouped by
+  repository, with stats on top (worktrees, environments up, live sessions, left
+  behind). A card shows the status (`active`, `merged · waiting sweep`, `left
+  behind`) and `dirty` chips, the stage, branch, commits ahead and uncommitted
+  count, the app and API links with the Vite port, the sessions in it (live or
+  how long ago), and, for merged and left-behind work, the reason and
+  `make wt-down ID=<id>` with a copy button (a toast when the clipboard is
+  blocked, a note when `wt-down` would refuse). A click shows the database,
+  path and e2e port. The rail filters by text, `active` | `all` and repository.
+  It reads `/api/work` once each time the tab opens, with a waiting state for
+  the cold answer, and never polls; no control writes anything. At 860px and
+  under the rail sits above the cards and long text wraps. Session groups under
+  `.claude/worktrees/` carry a `⎇ <worktree>` badge.
+
 - **`GET /api/work`**, the data behind the coming Work tab: one entry per
   worktree (the main checkout left out) of every repository a session ran in.
   Each carries its branch, commits ahead of `origin/main` and the uncommitted
@@ -15,7 +29,9 @@ Notable changes to pergula. Newest first.
   it, live or not, including one that moved in mid-session; and a status:
   `active`, `merged` (its PR is merged, waiting for the sweep) or `left` (PR
   closed unmerged, or seven days with no commit and no session), with the reason
-  and `make wt-down ID=<id>` to copy. GitHub is asked through `gh pr list`, kept
+  and `make wt-down ID=<id>` to copy, offered when any checkout of the
+  repository has that target (a branch cut before the tooling, or a main that
+  has not merged it yet, still has a sibling it runs from). GitHub is asked through `gh pr list`, kept
   five minutes and simply left out when `gh` fails. Read-only: nothing is fetched
   and nothing is changed.
 
