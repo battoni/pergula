@@ -1712,6 +1712,18 @@ esac
         self.assertEqual(cards["gone-3"]["command"], "make wt-down ID=gone-3")
         self.assertEqual(cards["done-2"]["command"], "make wt-down ID=done-2")
 
+    def test_no_command_for_an_id_a_shell_would_split(self):
+        """The command goes to the clipboard and into a shell: an ID that
+        `worktree.py` would refuse (ID_RE) is never pasted there."""
+        record = self.old / ".worktree.json"
+        self.addCleanup(record.unlink)
+        record.write_text(json.dumps({"id": "x;touch pwned"}))
+
+        card = self.cards()["x;touch pwned"]
+
+        self.assertEqual(card["status"], "left")
+        self.assertEqual(card["command"], "")
+
     def test_a_session_counts_where_its_cwd_moved(self):
         self.assertEqual([s["id"] for s in self.cards()["gone-3"]["sessions"]], ["s3"])
 
