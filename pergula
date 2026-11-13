@@ -812,6 +812,27 @@ def find_transcript(scope: Path | None, session: str | None) -> Path | None:
     return max(transcripts, key=lambda path: path.stat().st_mtime)
 
 
+WORKTREES = "/.claude/worktrees/"
+WORKTREES_SLUG = project_slug(Path(WORKTREES)).rstrip("-")
+
+
+def home_of(meta: dict) -> tuple[str, str]:
+    """The group a session belongs to, as (slug, path). A session started inside
+    `<repo>/.claude/worktrees/<name>` is one piece of the repository's work, so
+    it joins the repository's group instead of opening one of its own."""
+    cwd, slug = meta["cwd"], meta["slug"]
+    in_worktree = WORKTREES in cwd
+    if in_worktree:
+        repo = cwd.split(WORKTREES)[0]
+        return project_slug(Path(repo)), repo
+
+    slug_in_worktree = WORKTREES_SLUG in slug
+    if slug_in_worktree:
+        return slug.split(WORKTREES_SLUG)[0], cwd
+
+    return slug, cwd
+
+
 def build_index(scope: Path | None) -> dict:
     transcripts = all_transcripts(scope)
     if not transcripts:
@@ -844,10 +865,11 @@ def build_index(scope: Path | None) -> dict:
             "pid": running["pid"] if running else 0,
         }
 
-        group = groups.setdefault(meta["slug"], {"slug": meta["slug"], "path": "", "sessions": []})
-        first_cwd_seen = meta["cwd"] and not group["path"]
+        slug, home = home_of(meta)
+        group = groups.setdefault(slug, {"slug": slug, "path": "", "sessions": []})
+        first_cwd_seen = home and not group["path"]
         if first_cwd_seen:
-            group["path"] = meta["cwd"]
+            group["path"] = home
         group["sessions"].append(meta)
 
     projects = []
@@ -4397,6 +4419,18 @@ function buildSessionRow(meta, ordinal) {
   fillName(name, meta);
   row.appendChild(name);
 
+  // A worktree session sits in its repository's group; the badge says which
+  // piece of work it is, unless the title already does.
+  const worktree = (meta.cwd || '').split('/.claude/worktrees/')[1]?.split('/')[0] || '';
+  const titleNamesIt = meta.title.includes(worktree);
+  const needsBadge = worktree && !titleNamesIt;
+  if (needsBadge) {
+    const badge = document.createElement('span');
+    badge.className = 'wt-badge';
+    badge.textContent = '⎇ ' + worktree;
+    row.appendChild(badge);
+  }
+
   const when = document.createElement('span');
   when.className = 'when';
   when.textContent = whenLabel(meta);
@@ -4488,15 +4522,6 @@ function drawTree() {
     const name = document.createElement('b');
     name.textContent = projectName(project);
     summary.appendChild(name);
-
-    // A group under .claude/worktrees/ is one piece of work, not a project.
-    const worktree = (project.path || '').split('/.claude/worktrees/')[1];
-    if (worktree) {
-      const badge = document.createElement('span');
-      badge.className = 'wt-badge';
-      badge.textContent = '⎇ ' + worktree.split('/')[0];
-      summary.appendChild(badge);
-    }
 
     const pencil = document.createElement('button');
     pencil.className = 'pencil';

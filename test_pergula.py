@@ -364,6 +364,22 @@ class SessionTitle(TempTranscript):
         self.assertEqual(pergula.session_meta(self.path)["title"], "second")
 
 
+class WorktreeGroups(unittest.TestCase):
+    """A session in <repo>/.claude/worktrees/<name> joins the repository's group."""
+
+    def test_a_worktree_cwd_joins_the_repository(self):
+        meta = {"cwd": "/w/boanerges/.claude/worktrees/b-15", "slug": "-w-boanerges--claude-worktrees-b-15"}
+        self.assertEqual(pergula.home_of(meta), ("-w-boanerges", "/w/boanerges"))
+
+    def test_a_worktree_slug_without_cwd_still_joins(self):
+        meta = {"cwd": "", "slug": "-w-boanerges--claude-worktrees-b-10"}
+        self.assertEqual(pergula.home_of(meta), ("-w-boanerges", ""))
+
+    def test_an_ordinary_session_keeps_its_folder(self):
+        meta = {"cwd": "/w/life/finances", "slug": "-w-life"}
+        self.assertEqual(pergula.home_of(meta), ("-w-life", "/w/life/finances"))
+
+
 class TabTitle(TempTranscript):
     """The terminal tab names a live session after its project; the sidebar
     shows the name without the project, since the group already says it."""
@@ -1837,7 +1853,7 @@ class WorkTab(unittest.TestCase):
         self.assertIn("1800", self.script)
         self.assertIn("3000", self.script)
 
-    def test_session_groups_in_a_worktree_get_a_badge(self):
+    def test_worktree_sessions_get_a_badge(self):
         self.assertIn("/.claude/worktrees/", self.page)
         self.assertIn("⎇", self.page)
         self.assertIn(".wt-badge", self.page)

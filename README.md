@@ -100,7 +100,10 @@ everything.
 
 ## What it shows
 
-A sidebar groups every session by project. Sessions carry the name and the colour
+A sidebar groups every session by project. A session started inside a git
+worktree under `<repo>/.claude/worktrees/<name>` joins its repository's group
+instead of opening one of its own, so every piece of work on a project sits
+together. Sessions carry the name and the colour
 you gave them with `/rename` and `/color`, because the CLI writes both into the
 transcript. **active** sessions are the ones with a Claude process open in a
 terminal right now — read from the CLI's own per-pid registry in `~/.claude/sessions`, not
@@ -215,7 +218,8 @@ offered where the repository's Makefile has a `wt-down` target.
 
 Filter the cards by typing, switch between **active** and **all**, or narrow to
 one repository from the sidebar. In the sessions list, a session that ran inside
-a worktree carries a `⎇ <worktree>` badge.
+a worktree sits in its repository's group and carries a `⎇ <worktree>` badge,
+left out when the session's title already names the worktree.
 
 ## Keeping the Mac awake
 

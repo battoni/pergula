@@ -4,6 +4,15 @@ Notable changes to pergula. Newest first.
 
 ## Unreleased
 
+### Changed
+
+- **Worktree sessions join their repository's group.** A session whose `cwd`
+  is under `<repo>/.claude/worktrees/<name>` was a group of its own in the
+  sidebar; it now sits in the repository's group, with the rename, collapse and
+  order that group already had. The `⎇ <worktree>` badge moved from the group
+  header to the session row, and is left out when the title already names the
+  worktree.
+
 ### Added
 
 - **A Work tab**, the last in the rail: one card per worktree, grouped by
@@ -17,8 +26,7 @@ Notable changes to pergula. Newest first.
   path and e2e port. The rail filters by text, `active` | `all` and repository.
   It reads `/api/work` once each time the tab opens, with a waiting state for
   the cold answer, and never polls; no control writes anything. At 860px and
-  under the rail sits above the cards and long text wraps. Session groups under
-  `.claude/worktrees/` carry a `⎇ <worktree>` badge.
+  under the rail sits above the cards and long text wraps.
 
 - **`GET /api/work`**, the data behind the coming Work tab: one entry per
   worktree (the main checkout left out) of every repository a session ran in.
