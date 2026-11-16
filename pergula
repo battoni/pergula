@@ -573,7 +573,9 @@ def drop_caffeine() -> None:
 
 def caffeine_state() -> dict:
     with _CAFFEINE_LOCK:
-        return caffeine_reading()
+        reading = caffeine_reading()
+
+    return {**reading, "claude": claude_caffeines()}
 
 
 def start_caffeine(hours: float) -> dict:
@@ -601,6 +603,108 @@ def stop_caffeine() -> dict:
         save_caffeine(0.0, 0)
 
         return caffeine_reading()
+
+
+def elapsed_seconds(etime: str) -> int:
+    """`ps -o etime` reads `[[dd-]hh:]mm:ss`."""
+    days, _, clock = etime.rpartition("-")
+    fields = [int(field) for field in clock.split(":")]
+    while len(fields) < 3:
+        fields.insert(0, 0)
+
+    return (int(days) if days else 0) * 86400 + fields[0] * 3600 + fields[1] * 60 + fields[2]
+
+
+def process_table() -> dict:
+    try:
+        listing = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,etime=,command="],
+                                 capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {}
+
+    table = {}
+    for line in listing.splitlines():
+        parts = line.split(None, 3)
+        complete = len(parts) == 4 and parts[0].isdigit() and parts[1].isdigit()
+        if not complete:
+            continue
+
+        table[int(parts[0])] = {"ppid": int(parts[1]), "etime": parts[2], "command": parts[3]}
+
+    return table
+
+
+def is_claude(command: str) -> bool:
+    words = command.split()
+
+    return bool(words) and Path(words[0]).name == "claude"
+
+
+def claude_above(table: dict, pid: int) -> int:
+    """The nearest `claude` among the ancestors, or 0 when there is none."""
+    seen = set()
+    current = table[pid]["ppid"]
+    while current in table and current not in seen:
+        seen.add(current)
+        if is_claude(table[current]["command"]):
+            return current
+
+        current = table[current]["ppid"]
+
+    return 0
+
+
+def process_cwd(pid: int) -> str:
+    try:
+        listing = subprocess.run(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+                                 capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+    for line in listing.splitlines():
+        if line.startswith("n"):
+            return line[1:]
+
+    return ""
+
+
+def claude_caffeines(table: dict | None = None) -> list[dict]:
+    """Every `caffeinate` a Claude session started, so the button can name the
+    other holds keeping the Mac awake. On 14/11/2026 an away run left a bare
+    `caffeinate -dims` behind that held the Mac for 51 hours while this button
+    read "keep awake". Claude Code's own `caffeinate -i -t 300`, which it runs
+    while it works, hangs straight off the `claude` process and is left out: a
+    command the session ran sits under a shell in between."""
+    table = process_table() if table is None else table
+    found = []
+    for pid, row in sorted(table.items()):
+        words = row["command"].split()
+        named = bool(words) and Path(words[0]).name == "caffeinate"
+        if not named:
+            continue
+
+        session = claude_above(table, pid)
+        builtin = session == row["ppid"]
+        if not session or builtin:
+            continue
+
+        command = " ".join(words)
+        timeout = re.search(r"(?:^|\s)-\w*t\s*(\d+)", command)
+        tied = re.search(r"(?:^|\s)-\w*w\s*(\d+)", command)
+        age = elapsed_seconds(row["etime"])
+        bounded = bool(timeout or tied)
+        found.append({
+            "pid": pid,
+            "command": command,
+            "age": age,
+            "left": max(0, int(timeout.group(1)) - age) if timeout else 0,
+            "forever": not bounded,
+            "tied": bool(tied),
+            "session": session,
+            "cwd": process_cwd(session).replace(str(Path.home()), "~"),
+        })
+
+    return found
 
 
 def adopt_caffeine() -> None:
@@ -2441,10 +2545,10 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if hours <= 0:
-            self.send_ok(stop_caffeine())
+            self.send_ok({**stop_caffeine(), "claude": claude_caffeines()})
             return
 
-        self.send_ok(start_caffeine(hours))
+        self.send_ok({**start_caffeine(hours), "claude": claude_caffeines()})
 
     def set_usage_settings(self, payload: dict):
         """The weekday and hour the quota week turns at."""
@@ -2856,6 +2960,8 @@ PAGE = r"""<!doctype html>
   }
   .rail-foot button:hover { color: var(--heading); }
   .rail-foot button.on { background: var(--accent-soft); border-color: var(--accent); color: var(--heading); }
+  .rail-foot button.claude { border-color: var(--accent); color: var(--heading); }
+  .rail-foot button.forever { border-color: var(--danger); color: var(--danger); }
   .project { margin-bottom: 4px; }
   .project > summary {
     list-style: none; cursor: pointer;
@@ -3628,6 +3734,9 @@ const STRINGS = {
     palettePlaceholder: 'copiar um snippet… (enter copia)',
     keepAwake: 'manter acordado', keepAwakeHint: 'impedir o Mac de dormir',
     awakeFor: 'acordado · {time}', stopAwake: 'deixar dormir',
+    claudeAwake: 'acordado pelo Claude · {count}', claudeMore: '+{count} Claude',
+    claudeLine: '{cwd} · {age} · {limit} · pid {pid}', claudeNoLimit: 'sem limite',
+    claudeTied: 'até a sessão terminar', claudeLeft: 'faltam {time}',
     tabUsage: 'uso',
     spanDay: 'dia', spanWeek: 'semana', spanMonth: 'mês', spanYear: 'ano', spanCustom: 'datas',
     fromDate: 'de', toDate: 'até', previous: 'anterior', following: 'próximo',
@@ -3729,6 +3838,9 @@ const STRINGS = {
     palettePlaceholder: 'copy a snippet… (enter copies)',
     keepAwake: 'keep awake', keepAwakeHint: 'hold off sleep on this Mac',
     awakeFor: 'awake · {time}', stopAwake: 'let it sleep',
+    claudeAwake: 'awake by Claude · {count}', claudeMore: '+{count} Claude',
+    claudeLine: '{cwd} · {age} · {limit} · pid {pid}', claudeNoLimit: 'no limit',
+    claudeTied: 'until the session ends', claudeLeft: '{time} left',
     tabUsage: 'usage',
     spanDay: 'day', spanWeek: 'week', spanMonth: 'month', spanYear: 'year', spanCustom: 'dates',
     fromDate: 'from', toDate: 'to', previous: 'previous', following: 'next',
@@ -3808,6 +3920,7 @@ const awakeHours = document.getElementById('awakeHours');
 
 // The deadline the server handed back, as an epoch in seconds. Zero is asleep.
 let awakeUntil = 0;
+let claudeHolds = [];
 const scopeAll = document.getElementById('scopeAll');
 
 for (const [name, box] of Object.entries(toggles)) {
@@ -4643,18 +4756,48 @@ function countdown(seconds) {
   return hours + ':' + String(minutes).padStart(2, '0');
 }
 
+function claudeLimit(hold) {
+  if (hold.forever) return t('claudeNoLimit');
+
+  if (hold.tied) return t('claudeTied');
+
+  return t('claudeLeft', { time: countdown(hold.left) });
+}
+
+// One line per caffeinate a Claude session left running, for the tooltip.
+function claudeLines() {
+  return claudeHolds.map((hold) => t('claudeLine', {
+    cwd: hold.cwd || '?',
+    age: countdown(hold.age),
+    limit: claudeLimit(hold),
+    pid: hold.pid,
+  })).join('\n');
+}
+
 function paintAwake() {
   const left = awakeUntil - Date.now() / 1000;
   const holding = left > 0;
+  const count = claudeHolds.length;
+  const forever = claudeHolds.some((hold) => hold.forever);
   awake.classList.toggle('on', holding);
-  if (!holding) {
-    awake.textContent = t('keepAwake');
-    awake.title = t('keepAwakeHint');
+  awake.classList.toggle('claude', count > 0);
+  awake.classList.toggle('forever', forever);
+  const lines = count ? '\n\n' + claudeLines() : '';
+  if (holding) {
+    const more = count ? ' ' + t('claudeMore', { count: count }) : '';
+    awake.textContent = t('awakeFor', { time: countdown(left) }) + more;
+    awake.title = t('stopAwake') + lines;
     return;
   }
 
-  awake.textContent = t('awakeFor', { time: countdown(left) });
-  awake.title = t('stopAwake');
+  if (count) {
+    awake.textContent = t('claudeAwake', { count: count });
+    awake.title = t('keepAwakeHint') + lines;
+    return;
+  }
+
+  awake.textContent = t('keepAwake');
+  awake.title = t('keepAwakeHint');
 }
 
 // Counted down here rather than polled: this page set the deadline, so a
@@ -4686,6 +4829,7 @@ function drawAwakeHours(hours) {
 
 function onAwake(state) {
   awakeUntil = state.until || 0;
+  claudeHolds = state.claude || [];
   drawAwakeHours(state.hours || []);
   paintAwake();
 }
@@ -6916,6 +7060,10 @@ pollIndex();
 loopSnippets();
 loadAwake();
 setInterval(tickAwake, 1000);
+
+// The countdown above is this page's own; a caffeinate a Claude session starts
+// is not, so the list is asked for again every half minute.
+setInterval(loadAwake, 30000);
 </script>
 </body>
 </html>

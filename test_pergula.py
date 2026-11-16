@@ -1527,6 +1527,55 @@ class Caffeine(unittest.TestCase):
         self.assertEqual(pergula.CAFFEINE_PATH.read_text(), "{{{")
 
 
+class ClaudeCaffeines(unittest.TestCase):
+    """The button also says which `caffeinate` a Claude session left running.
+    The table is the one ps gave on 14/11/2026, when an away run's bare
+    `caffeinate -dims` held the Mac awake for 51 hours. No real process is read:
+    the table is handed in and the working directory is stubbed."""
+
+    CLAUDE = {"ppid": 1, "etime": "02-15:09:00", "command": "/Users/x/.local/bin/claude"}
+    SHELL = {"ppid": 39707, "etime": "02-03:31:08", "command": "/bin/zsh -c eval 'caffeinate -dims'"}
+
+    def census(self, extra: dict) -> list[dict]:
+        table = {39707: self.CLAUDE, 74479: self.SHELL, **extra}
+        with unittest.mock.patch.object(pergula, "process_cwd", return_value="/tmp/rnc-4"):
+            return pergula.claude_caffeines(table)
+
+    def test_finds_the_weekend_caffeinate_and_says_it_has_no_limit(self):
+        found = self.census({74482: {"ppid": 74479, "etime": "02-03:31:08", "command": "caffeinate -dims"}})
+
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["pid"], 74482)
+        self.assertEqual(found[0]["age"], 51 * 3600 + 31 * 60 + 8)
+        self.assertTrue(found[0]["forever"])
+        self.assertEqual(found[0]["session"], 39707)
+        self.assertEqual(found[0]["cwd"], "/tmp/rnc-4")
+
+    def test_a_timeout_or_a_tie_is_not_forever(self):
+        found = self.census({
+            80001: {"ppid": 74479, "etime": "00:20", "command": "caffeinate -dims -t 120"},
+            80002: {"ppid": 74479, "etime": "10:00", "command": "caffeinate -dims -w 39707"},
+        })
+
+        self.assertEqual([hold["forever"] for hold in found], [False, False])
+        self.assertEqual([hold["tied"] for hold in found], [False, True])
+        self.assertEqual(found[0]["left"], 100)
+
+    def test_leaves_out_claude_codes_own_and_the_ones_no_session_started(self):
+        found = self.census({
+            80003: {"ppid": 39707, "etime": "01:00", "command": "caffeinate -i -t 300"},
+            80004: {"ppid": 1, "etime": "05:00:00", "command": "caffeinate -disu -t 3600"},
+        })
+
+        self.assertEqual(found, [])
+
+    def test_a_loop_in_the_table_ends(self):
+        table = {1: {"ppid": 2, "etime": "00:01", "command": "caffeinate -d"},
+                 2: {"ppid": 1, "etime": "00:01", "command": "/bin/zsh"}}
+
+        self.assertEqual(pergula.claude_caffeines(table), [])
+
+
 class WorkIndex(unittest.TestCase):
     """The Work tab's data: every worktree of every repository a session ran in.
     git, the record and the transcripts are real; gh is a stub on PATH."""

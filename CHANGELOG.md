@@ -4,6 +4,19 @@ Notable changes to pergula. Newest first.
 
 ## Unreleased
 
+### Added
+
+- **The awake button sees what Claude sessions left running.** On 14/11/2026
+  an away run started a bare `caffeinate -dims` and the Mac stayed awake for 51
+  hours while the button read `keep awake`. `/api/caffeine` now also lists every
+  `caffeinate` with a Claude session among its ancestors, with its age, the time
+  left, whether it is tied to a session (`-w`) or has no limit, and the
+  session's folder. The button reads `awake by Claude · N` or `+N Claude`, lists
+  them in its tooltip and turns red when one has no limit. The list is
+  read-only and refreshed every 30 seconds. Claude Code's own
+  `caffeinate -i -t 300` hangs straight off `claude`, not off a shell, and is
+  left out.
+
 ### Changed
 
 - **Worktree sessions join their repository's group.** A session whose `cwd`

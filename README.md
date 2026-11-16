@@ -235,6 +235,16 @@ The `-i` is the one that matters: it holds off the idle sleep that would stop th
 agents. The `-d` keeps the display up as well, which is what makes it visible
 that something is holding the machine.
 
+The button also knows about every `caffeinate` a Claude session started. A
+session sometimes starts its own `caffeinate`, often during an away run, and
+nothing stops it when the run ends. The button then reads `awake by Claude · 1`
+(or `+1 Claude` next to its own countdown), and its tooltip lists each one: the
+project, how long it has been running, what limit it has and its pid. One
+started with no `-t` and no `-w` keeps the Mac awake until someone kills it, so
+the button turns red. The list is refreshed every thirty seconds and is
+read-only: pergula never stops a process it did not start. Claude Code's own
+five-minute `caffeinate -i -t 300`, which it runs while it works, is left out.
+
 Clicking it again lets the Mac sleep. So does the deadline running out, and so
 does `make deploy`, which restarts the agent and takes the child process with it.
 There is no way to leave it on by accident and no way to leave it on forever.
