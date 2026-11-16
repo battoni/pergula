@@ -91,6 +91,11 @@ the file names — after checking with `ps` that the pid is still a `caffeinate`
 because a pid gets reused. The `-i` is the flag that matters: without it the Mac
 sleeps anyway and the agents stop with it.
 
+`claude_caffeines` is the other half: every `caffeinate` with a `claude` among
+its ancestors, listed for the button and never signalled. Claude Code's own
+`caffeinate -i -t 300` hangs straight off `claude`; one a session ran sits under
+a shell. That parent is the whole test, so keep it if you change the walk.
+
 **Transcripts only ever grow.** `parse_transcript` relies on that to parse
 incrementally from a saved byte offset. The offset bookkeeping fails silently, so
 change it only with the tests in front of you.
