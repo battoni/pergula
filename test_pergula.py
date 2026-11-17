@@ -1752,6 +1752,12 @@ esac
         self.assertEqual(card["reason"], "PR #13 closed unmerged")
         self.assertEqual(card["command"], "make wt-down ID=gone-3")
 
+    def test_a_session_resumes_from_the_folder_it_started_in(self):
+        cards = self.cards()
+
+        self.assertEqual(cards["feat-1"]["sessions"][0]["cwd"], str(self.feat))
+        self.assertEqual(cards["gone-3"]["sessions"][0]["cwd"], str(self.repo))
+
     def strip_teardown(self, *checkouts):
         for checkout in checkouts:
             makefile = checkout / "Makefile"
@@ -1898,9 +1904,12 @@ class WorkTab(unittest.TestCase):
         self.assertNotRegex(self.script, r"fetch\('/api/(?!work')")
 
     def test_the_copy_button_holds_the_command_the_server_gave(self):
-        self.assertIn("navigator.clipboard.writeText(card.command)", self.script)
-        self.assertIn("1800", self.script)
+        self.assertIn("copyText(card.command,", self.script)
         self.assertIn("3000", self.script)
+
+    def test_resume_cds_where_the_session_started(self):
+        self.assertIn("shellWord(item.cwd || card.path) + ' && claude --resume ' + item.id", self.script)
+        self.assertIn("if (card.status === 'active') chips.appendChild(resumeButton(card))", self.script)
 
     def test_worktree_sessions_get_a_badge(self):
         self.assertIn("/.claude/worktrees/", self.page)

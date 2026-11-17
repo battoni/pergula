@@ -2364,6 +2364,9 @@ def work_index() -> dict:
                     "id": meta["id"],
                     "slug": meta["slug"],
                     "title": meta["title"],
+                    # Where it started: its transcript lives under that folder,
+                    # so `claude --resume` only finds it from there.
+                    "cwd": meta["cwd"],
                     "mtime": meta["mtime"],
                     "live": meta["id"] in live,
                     "state": (live.get(meta["id"]) or {}).get("state", ""),
@@ -3342,6 +3345,13 @@ PAGE = r"""<!doctype html>
     padding: 2px 9px; background: var(--panel-soft); border: 1px solid var(--line); border-radius: 8px;
     font-size: 12px; color: var(--body);
   }
+  .wcard .schip { font-family: inherit; text-align: left; cursor: copy; }
+  .wcard .schip:hover { border-color: var(--accent); }
+  .wcard .schip .when.done { color: var(--accent); }
+  .wcard .chips .resume { padding: 1px 9px; font-size: 11px; }
+  .wcard .more dd.go { cursor: copy; }
+  .wcard .more dd.go:hover { color: var(--heading); text-decoration: underline; }
+  .wcard .more dd.go.done { color: var(--accent); }
   .wcard .schip .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .wcard .schip .when { flex: none; color: var(--subtle); font-size: 11px; }
   .wcard .schip .when.live { color: var(--state-ready); }
@@ -3779,6 +3789,11 @@ const STRINGS = {
     noWorkMatch: 'Nenhuma worktree encontrada.',
     workLoading: 'lendo cada worktree… a primeira resposta leva alguns segundos',
     workFailed: 'não foi possível ler as worktrees',
+    workResume: 'retomar',
+    workResumeTitle: 'copiar o comando que volta para a sessão mais recente desta worktree',
+    workStartTitle: 'copiar o comando que abre o Claude nesta worktree',
+    workResumeSession: 'copiar o comando que retoma a sessão {id}',
+    workGoTitle: 'copiar o cd para esta worktree',
     moreDb: 'DB', morePath: 'Caminho da worktree', moreEndToEnd: 'porta e2e', moreNone: 'nenhuma (sem ambiente)',
   },
   en: {
@@ -3883,6 +3898,11 @@ const STRINGS = {
     noWorkMatch: 'No worktree matches.',
     workLoading: 'reading every worktree… the first answer takes a few seconds',
     workFailed: 'could not read the worktrees',
+    workResume: 'resume',
+    workResumeTitle: 'copy the command that takes you back to this worktree\'s newest session',
+    workStartTitle: 'copy the command that opens Claude in this worktree',
+    workResumeSession: 'copy the command that resumes session {id}',
+    workGoTitle: 'copy the cd to this worktree',
     moreDb: 'DB', morePath: 'Worktree path', moreEndToEnd: 'e2e port', moreNone: 'none (no environment)',
   },
 };
@@ -6290,15 +6310,22 @@ function environmentRow(card) {
   return row;
 }
 
-function sessionChip(item) {
-  const box = textSpan('schip', '');
-  box.title = item.id;
+function sessionChip(item, card) {
+  const box = document.createElement('button');
+  box.type = 'button';
+  box.className = 'schip';
+  box.title = t('workResumeSession', { id: item.id });
   box.appendChild(codeSpan(item.id.slice(0, 8)));
   box.appendChild(textSpan('name', item.title || ''));
   const when = item.live
     ? textSpan('when live' + (item.state ? ' ' + item.state : ''), '● ' + t('workLive'))
     : textSpan('when', t('workAgo', { t: ago(item.mtime) }));
   box.appendChild(when);
+  box.addEventListener('click', (event) => {
+    event.stopPropagation();
+    const back = when.textContent;
+    copyText(resumeCommand(card, item), () => flash(when, t('copied'), back));
+  });
   return box;
 }
 
@@ -6309,22 +6336,50 @@ function sessionsRow(card) {
     return row;
   }
 
-  for (const item of card.sessions) row.appendChild(sessionChip(item));
+  for (const item of card.sessions) row.appendChild(sessionChip(item, card));
   return row;
 }
 
-function copyCommand(card, button) {
+function copyText(text, onCopied) {
   const failed = () => toast(t('clipboardBlocked'));
   if (!navigator.clipboard) {
     failed();
     return;
   }
 
-  navigator.clipboard.writeText(card.command).then(() => {
-    button.textContent = t('copied');
-    button.classList.add('done');
-    setTimeout(() => { button.textContent = t('copy'); button.classList.remove('done'); }, 1800);
-  }).catch(failed);
+  navigator.clipboard.writeText(text).then(onCopied).catch(failed);
+}
+
+// Quoted only when it has to be, so the common path still reads as typed.
+function shellWord(text) {
+  const plain = /^[\w@%+=:,.\/-]+$/.test(text);
+  if (plain) return text;
+  return "'" + text.replace(/'/g, "'\\''") + "'";
+}
+
+function goCommand(card) {
+  return 'cd ' + shellWord(card.path);
+}
+
+// A session is resumed from the folder it started in, where its transcript
+// lives; one that moved into the worktree later started outside it.
+function resumeCommand(card, item) {
+  if (!item) return goCommand(card) + ' && claude';
+  return 'cd ' + shellWord(item.cwd || card.path) + ' && claude --resume ' + item.id;
+}
+
+function resumeButton(card) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'copy resume';
+  button.textContent = t('workResume');
+  const newest = card.sessions[0];
+  button.title = newest ? t('workResumeTitle') : t('workStartTitle');
+  button.addEventListener('click', (event) => {
+    event.stopPropagation();
+    copyText(resumeCommand(card, newest), () => flash(button, t('copied'), t('workResume')));
+  });
+  return button;
 }
 
 function teardownRow(card) {
@@ -6339,7 +6394,7 @@ function teardownRow(card) {
   button.textContent = t('copy');
   button.addEventListener('click', (event) => {
     event.stopPropagation();
-    copyCommand(card, button);
+    copyText(card.command, () => flash(button, t('copied'), t('copy')));
   });
   row.appendChild(button);
 
@@ -6364,6 +6419,14 @@ function moreList(card) {
     dd.textContent = value;
     list.append(dt, dd);
   }
+
+  const path = list.children[3];
+  path.className = 'go';
+  path.title = t('workGoTitle');
+  path.addEventListener('click', (event) => {
+    event.stopPropagation();
+    copyText(goCommand(card), () => flash(path, t('copied'), shortPath(card.path)));
+  });
   return list;
 }
 
@@ -6381,6 +6444,7 @@ function workCard(card) {
   const chips = textSpan('chips', '');
   if (card.dirty) chips.appendChild(chip(t('workDirty'), 'dirty'));
   chips.appendChild(statusChip(card));
+  if (card.status === 'active') chips.appendChild(resumeButton(card));
   first.appendChild(chips);
   box.appendChild(first);
 
